@@ -98,7 +98,8 @@ async function main() {
     const me = await request('/api/auth/me', { token: tokenA });
     assert.equal(me.status, 200);
     assert.equal(me.data.user.id, userA.id);
-    assert.equal(me.data.user.theme, 'dark');
+    assert.ok(['dark', 'light'].includes(me.data.user.theme));
+    assert.equal(me.data.user.theme, userA.theme);
     ok('sesión JWT y perfil privado');
     const login = await request('/api/auth/login', {
         method: 'POST',

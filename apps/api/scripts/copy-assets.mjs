@@ -11,6 +11,10 @@ const assets = [
     path.join(apiRoot, 'src', 'data', 'academic-catalog.json'),
     path.join(apiRoot, 'dist', 'data', 'academic-catalog.json'),
   ],
+  [
+    path.join(apiRoot, 'src', 'data', 'legal-corpus.json'),
+    path.join(apiRoot, 'dist', 'data', 'legal-corpus.json'),
+  ],
 ];
 
 for (const [from, to] of assets) {

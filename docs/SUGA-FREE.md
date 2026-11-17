@@ -5,16 +5,19 @@ persistentes. No requiere dominio propio ni tarjeta. Requiere que la creadora te
 de **GitHub** y una cuenta de **Suga**; por seguridad, esas cuentas no se crean ni se operan
 desde este repositorio.
 
-> Estado: artefactos listos y verificados en local. **Todavía no hay URL pública** porque no se
-> ha conectado el repositorio ni creado el servicio. No presentes `localhost`, IP ni túneles
-> como enlace oficial.
+> Estado: **página web pública desplegada y verificada** en
+> https://a7yp4cd07ujg-production-zay69hs2.us-central1.suga.run
+>
+> ETON LEX es una página web pública de acceso libre con registro de cuentas. No es una app de
+> escritorio ni una app instalable; no presentes `localhost`, IP ni túneles como enlace oficial.
 
 ## Qué se preparó en el repo
 
 - `Dockerfile`: imagen ligera que solo instala dependencias de producción y usa los artefactos
   ya compilados (`apps/api/dist`, `apps/web/dist`). Pensada para 0.1 vCPU / 256 MiB.
 - `Dockerfile.full`: imagen completa, útil en un VPS con más RAM.
-- `start:production`: migra la base, siembra fuentes/normas y arranca la API.
+- `start:production`: migra la base, siembra fuentes/normas, importa el corpus jurídico
+  verificado si la biblioteca está vacía y arranca la API.
 - Respaldo automático diario a las 03:00 dentro de `/data/backups` (retención 14 días).
 - Fuente oficial activa: **Diario Oficial El Peruano — Normas Legales**. La API revisa cada
   30 minutos y crea propuestas pendientes para validación humana.
@@ -115,6 +118,47 @@ sitemap ausentes. Además, comprueba manualmente:
 - `/salas`, crear sala, chat, pizarra y videollamada con ambas cuentas.
 - `/actualizaciones`: deben aparecer propuestas procedentes de El Peruano.
 - `/admin → Fuentes`: `elperuano` activa, sin error reciente.
+
+## Despliegue real ejecutado (17 de noviembre de 2026)
+
+- Repositorio público: https://github.com/gozzerzalet-blip/eton-lex
+- Organización Suga: `ETON LEX` (plan Free), región `US Central 1 / Iowa`.
+- Proyecto: `eton-lex`, ID `adffe9c7-f1b2-4f9c-8445-863b97942ce1`.
+- Environment: `production`, ID `32268cfb-c073-4753-ba26-ac97c5f2c455`.
+- Servicio: `eton-lex`, nodo `a7yp4cd07ujg`.
+- Build: **Service from GitHub → Dockerfile**, rama `main`, raíz `(root)`, archivo `Dockerfile`.
+- Recursos: `0.1 vCPU`, `256 MiB`, `1 réplica`, volumen `eton-lex-data` de `1 GiB` en `/data`.
+- URL pública HTTPS: https://a7yp4cd07ujg-production-zay69hs2.us-central1.suga.run
+
+Procedimiento que funcionó:
+
+1. Instalar la GitHub App de Suga con acceso de lectura al repositorio.
+2. Crear el proyecto desde **New project → gozzerzalet-blip/eton-lex**.
+3. Elegir **Build method: Dockerfile** y el archivo `Dockerfile` (no Compose: el importador Compose
+   ignora `build` y `env_file`).
+4. En el canvas del servicio configurar puerto `4000`, URL pública, volumen `/data` y las
+   variables de la sección 3. Marcar `JWT_SECRET` y `SEED_ADMIN_PASSWORD` como sensibles.
+5. Hacer clic en **Deploy** y esperar a “Everything is deployed” y a que el servicio esté `Running`.
+
+Verificación ejecutada contra la URL pública:
+
+- `npm.cmd run deploy:check -- --url https://a7yp4cd07ujg-production-zay69hs2.us-central1.suga.run`
+  → `OK: enlace directo, HTTPS, health, SEO básico y PWA responden.`
+- `E2E_BASE_URL=https://a7yp4cd07ujg-production-zay69hs2.us-central1.suga.run npm.cmd --workspace apps/api run e2e`
+  → registro real de dos cuentas, sesión JWT, login, biblioteca verificada, mensajería,
+  notificaciones, WebRTC y permisos.
+- El corpus jurídico se incluye en la imagen como `apps/api/dist/data/legal-corpus.json`:
+  27 normas, 22 verificadas, 7,433 artículos y 1,412 versiones históricas. Se importa una sola
+  vez, cuando la biblioteca está vacía; nunca sobrescribe datos creados después.
+
+Actualizar la página web cuando haya cambios:
+
+```powershell
+# hacer commit y push a main, luego en Suga: proyecto → Canvas → Deploy
+```
+
+Suga reconstruye desde el commit de `main`. Las variables sensibles no se reenvían: se conservan
+en el environment.
 
 ## Límites honestos del plan Free
 
