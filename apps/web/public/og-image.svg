@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" />
+      <stop offset="1" stop-color="#EFEFF2" />
+    </linearGradient>
+    <radialGradient id="glow" cx="0.18" cy="0.16" r="0.9">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.95" />
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="tile" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" />
+      <stop offset="1" stop-color="#F4F5F7" />
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" />
+      <stop offset="0.5" stop-color="#D9DCE1" />
+      <stop offset="1" stop-color="#BEC2C8" />
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#bg)" />
+  <rect width="1200" height="630" fill="url(#glow)" />
+  <rect x="1" y="1" width="1198" height="628" rx="12" stroke="#E2E3E7" stroke-width="2" />
+
+  <!-- icono: templo clásico con libro abierto -->
+  <g transform="translate(84 211)">
+    <rect width="208" height="208" rx="48" fill="url(#tile)" />
+    <rect x="1" y="1" width="206" height="206" rx="47" stroke="url(#edge)" stroke-width="2" />
+    <g transform="translate(19 19) scale(0.332)" stroke="#0A0A0A" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M256 62 L404 160 H108 Z" stroke-width="13" />
+      <path d="M256 90 L372 160 H140" stroke-width="9" />
+      <rect x="124" y="180" width="264" height="32" stroke-width="10" />
+      <g stroke-width="10">
+        <rect x="133" y="212" width="38" height="14" />
+        <rect x="141" y="226" width="22" height="94" />
+        <rect x="134" y="320" width="36" height="14" />
+        <rect x="185" y="212" width="38" height="14" />
+        <rect x="193" y="226" width="22" height="94" />
+        <rect x="186" y="320" width="36" height="14" />
+        <rect x="237" y="212" width="38" height="14" />
+        <rect x="245" y="226" width="22" height="94" />
+        <rect x="238" y="320" width="36" height="14" />
+        <rect x="289" y="212" width="38" height="14" />
+        <rect x="297" y="226" width="22" height="94" />
+        <rect x="290" y="320" width="36" height="14" />
+        <rect x="341" y="212" width="38" height="14" />
+        <rect x="349" y="226" width="22" height="94" />
+        <rect x="342" y="320" width="36" height="14" />
+      </g>
+      <path d="M116 338 H396" stroke-width="16" />
+      <path d="M256 372 C224 358, 172 354, 116 364 L116 440 C172 430, 224 434, 256 452 C288 434, 340 430, 396 440 L396 364 C340 354, 288 358, 256 372 Z" stroke-width="13" />
+      <path d="M256 372 V452" stroke-width="8" />
+      <path d="M182 392 C206 386, 228 387, 244 394" stroke-width="7" />
+      <path d="M330 392 C306 386, 284 387, 268 394" stroke-width="7" />
+    </g>
+  </g>
+
+  <!-- identidad -->
+  <text x="352" y="286" font-family="Georgia, 'Times New Roman', serif" font-size="82" letter-spacing="10" fill="#0A0A0A">ETON LEX</text>
+  <path d="M354 318 H776" stroke="#0A0A0A" stroke-opacity="0.18" stroke-width="2" />
+  <text x="354" y="376" font-family="Arial, 'Segoe UI', sans-serif" font-size="31" fill="#0A0A0A">El Derecho, siempre a tu alcance.</text>
+  <text x="354" y="424" font-family="Arial, 'Segoe UI', sans-serif" font-size="22" fill="#5B5B61">Plataforma jurídica para estudiantes de Derecho del Perú.</text>
+  <text x="354" y="470" font-family="Arial, 'Segoe UI', sans-serif" font-size="18" letter-spacing="1.5" fill="#8A8A90">LEGISLACIÓN VERIFICABLE · ETON AI CON FUENTES · COMUNIDAD PRIVADA</text>
+
+  <!-- creadora -->
+  <text x="354" y="580" font-family="Arial, 'Segoe UI', sans-serif" font-size="17" letter-spacing="2.4" fill="#9A9AA0">CREADA POR ZALET GOZZER</text>
+</svg>

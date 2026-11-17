@@ -1,0 +1,216 @@
+import crypto from 'node:crypto';
+import { Router } from 'express';
+import bcrypt from 'bcryptjs';
+import { z } from 'zod';
+import { db, logAudit, tx, uuid } from '../../db/index.js';
+import {
+  clearRefreshCookie, createRefreshToken, publicUser, requireAuth, revokeAllSessions,
+  revokeSession, rotateRefreshToken, setRefreshCookie, signAccess, type SessionUser,
+} from '../../lib/auth.js';
+import { ApiError, asyncHandler, badRequest, conflict, unauthorized } from '../../lib/http.js';
+
+export const authRouter = Router();
+
+const emailSchema = z.string().trim().toLowerCase().email('Correo electrónico inválido.').max(160);
+const passwordSchema = z.string().min(8, 'La contraseña debe tener al menos 8 caracteres.').max(200);
+
+const registerSchema = z.object({
+  name: z.string().trim().min(2, 'Ingresa tu nombre.').max(80),
+  email: emailSchema,
+  password: passwordSchema,
+  username: z.string().trim().min(3, 'El nombre de usuario debe tener al menos 3 caracteres.').max(30).optional().nullable(),
+  university: z.string().trim().max(160).optional().nullable(),
+  universityId: z.string().trim().max(40).optional().nullable(),
+  campusId: z.string().trim().max(80).optional().nullable(),
+  universityType: z.enum(['publica', 'privada']).optional().nullable(),
+  faculty: z.string().trim().max(120).optional().nullable(),
+  career: z.string().trim().max(160).optional().nullable(),
+  country: z.string().trim().max(80).optional(),
+  city: z.string().trim().max(80).optional().nullable(),
+  cycle: z.string().trim().max(40).optional().nullable(),
+  missingUniversity: z.string().trim().max(240).optional().nullable(),
+});
+
+function slug(value: string): string {
+  return value
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 20);
+}
+
+function uniqueUsername(preferred: string | null | undefined, fallback: string): string {
+  const base = (preferred && slug(preferred)) || slug(fallback) || 'estudiante';
+  let candidate = base.slice(0, 24);
+  let suffix = 1;
+  while (db.prepare('SELECT 1 FROM users WHERE username = ?').get(candidate)) {
+    candidate = `${base.slice(0, 20)}${suffix++}`;
+  }
+  return candidate;
+}
+
+function uniquePublicId(): string {
+  let id = crypto.randomBytes(5).toString('hex').toUpperCase();
+  while (db.prepare('SELECT 1 FROM users WHERE public_id = ?').get(id)) {
+    id = crypto.randomBytes(5).toString('hex').toUpperCase();
+  }
+  return id;
+}
+
+authRouter.post('/register', asyncHandler(async (req, res) => {
+  const data = registerSchema.parse(req.body);
+  const exists = db.prepare('SELECT id FROM users WHERE email = ?').get(data.email);
+  if (exists) throw conflict('Ya existe una cuenta con ese correo.');
+
+  const id = uuid();
+  const username = uniqueUsername(data.username, data.name);
+  const publicId = uniquePublicId();
+  db.prepare(`
+    INSERT INTO users (
+      id, email, password_hash, name, username, public_id, university, university_id, campus_id,
+      university_type, faculty, career, country, city, cycle, email_verified, onboarded
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+  `).run(
+    id, data.email, bcrypt.hashSync(data.password, 11), data.name, username, publicId,
+    data.university ?? null, data.universityId ?? null, data.campusId ?? null, data.universityType ?? null,
+    data.faculty ?? null, data.career ?? null, data.country ?? 'Perú', data.city ?? null, data.cycle ?? null,
+  );
+  if (data.missingUniversity) {
+    db.prepare(`
+      INSERT INTO reports (id, reporter_id, target_type, target_id, reason, status)
+      VALUES (?, ?, 'university', ?, ?, 'open')
+    `).run(uuid(), id, 'catalog-request', `Solicitud de universidad: ${data.missingUniversity}`);
+  }
+
+  const user: SessionUser = { id, email: data.email, name: data.name, role: 'student', avatar_url: null };
+  setRefreshCookie(res, createRefreshToken(id, req));
+  logAudit(id, 'auth.register', { email: data.email }, req.ip);
+  res.status(201).json({ accessToken: signAccess(user), user: publicUser(id, true) });
+}));
+
+authRouter.post('/login', asyncHandler(async (req, res) => {
+  const data = z.object({ email: emailSchema, password: z.string().min(1).max(200) }).parse(req.body);
+  const row = db.prepare('SELECT * FROM users WHERE email = ?').get(data.email) as any;
+  if (!row || !bcrypt.compareSync(data.password, row.password_hash)) {
+    throw unauthorized('Correo o contraseña incorrectos.');
+  }
+  const user: SessionUser = { id: row.id, email: row.email, name: row.name, role: row.role, avatar_url: row.avatar_url };
+  setRefreshCookie(res, createRefreshToken(row.id, req));
+  db.prepare('UPDATE users SET last_seen_at = datetime(\'now\') WHERE id = ?').run(row.id);
+  logAudit(row.id, 'auth.login', {}, req.ip);
+  res.json({ accessToken: signAccess(user), user: publicUser(row.id, true) });
+}));
+
+authRouter.post('/refresh', asyncHandler(async (req, res) => {
+  const token = req.cookies?.eton_refresh as string | undefined;
+  if (!token) throw unauthorized('No hay sesión activa.');
+  const rotated = rotateRefreshToken(token, req);
+  if (!rotated) {
+    clearRefreshCookie(res);
+    throw unauthorized('La sesión expiró. Inicia sesión nuevamente.');
+  }
+  setRefreshCookie(res, rotated.refresh);
+  res.json({ accessToken: rotated.access, user: publicUser(rotated.user.id, true) });
+}));
+
+authRouter.post('/logout', asyncHandler(async (req, res) => {
+  const token = req.cookies?.eton_refresh as string | undefined;
+  if (token) revokeSession(token);
+  clearRefreshCookie(res);
+  res.json({ ok: true });
+}));
+
+authRouter.post('/logout-all', requireAuth, asyncHandler(async (req, res) => {
+  revokeAllSessions(req.user!.id);
+  clearRefreshCookie(res);
+  res.json({ ok: true });
+}));
+
+authRouter.get('/me', requireAuth, asyncHandler(async (req, res) => {
+  res.json({ user: publicUser(req.user!.id, true) });
+}));
+
+authRouter.patch('/me', requireAuth, asyncHandler(async (req, res) => {
+  const data = z.object({
+    name: z.string().trim().min(2).max(80).optional(),
+    username: z.string().trim().min(3).max(30).regex(/^[a-zA-Z0-9._-]+$/, 'Solo letras, números, punto, guion y guion bajo.').optional(),
+    university: z.string().trim().max(160).nullable().optional(),
+    universityId: z.string().trim().max(40).nullable().optional(),
+    campusId: z.string().trim().max(80).nullable().optional(),
+    universityType: z.enum(['publica', 'privada']).nullable().optional(),
+    faculty: z.string().trim().max(120).nullable().optional(),
+    career: z.string().trim().max(160).nullable().optional(),
+    coverUrl: z.string().trim().max(300).nullable().optional(),
+    links: z.array(z.object({ label: z.string().max(60), url: z.string().url().max(300) })).max(8).optional(),
+    country: z.string().trim().max(80).optional(),
+    city: z.string().trim().max(80).nullable().optional(),
+    cycle: z.string().trim().max(40).nullable().optional(),
+    bio: z.string().trim().max(500).nullable().optional(),
+    theme: z.enum(['dark', 'light']).optional(),
+    interests: z.array(z.string().max(40)).max(12).optional(),
+    onboarded: z.boolean().optional(),
+    privacy: z.object({
+      profile: z.enum(['community', 'friends', 'private']).optional(),
+      activity: z.enum(['friends', 'private']).optional(),
+    }).optional(),
+    privacyFields: z.record(z.enum(['everyone', 'friends', 'private'])).optional(),
+  }).parse(req.body);
+
+  const fields: string[] = [];
+  const values: any[] = [];
+  const map: Record<string, string> = {
+    name: 'name', university: 'university', universityId: 'university_id', campusId: 'campus_id',
+    universityType: 'university_type', faculty: 'faculty', career: 'career', coverUrl: 'cover_url',
+    country: 'country', city: 'city', cycle: 'cycle', bio: 'bio', theme: 'theme',
+  };
+  for (const [key, column] of Object.entries(map)) {
+    if (data[key as keyof typeof data] !== undefined) {
+      fields.push(`${column} = ?`);
+      values.push(data[key as keyof typeof data]);
+    }
+  }
+  if (data.username !== undefined) {
+    const normalized = slug(data.username);
+    const taken = db.prepare('SELECT id FROM users WHERE username = ? AND id != ?').get(normalized, req.user!.id);
+    if (taken) throw conflict('Ese nombre de usuario ya está en uso.');
+    fields.push('username = ?'); values.push(normalized);
+  }
+  if (data.onboarded !== undefined) { fields.push('onboarded = ?'); values.push(data.onboarded ? 1 : 0); }
+  if (data.privacy !== undefined) { fields.push('privacy = ?'); values.push(JSON.stringify(data.privacy)); }
+  if (data.privacyFields !== undefined) { fields.push('privacy_fields = ?'); values.push(JSON.stringify(data.privacyFields)); }
+  if (data.links !== undefined) { fields.push('links = ?'); values.push(JSON.stringify(data.links)); }
+  if (fields.length) {
+    fields.push('updated_at = datetime(\'now\')');
+    db.prepare(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`).run(...values, req.user!.id);
+  }
+  if (data.interests) {
+    const valid = db.prepare('SELECT slug FROM legal_areas').all().map((r: any) => r.slug);
+    const del = db.prepare('DELETE FROM user_interests WHERE user_id = ?');
+    const ins = db.prepare('INSERT OR IGNORE INTO user_interests (user_id, area) VALUES (?, ?)');
+    tx(() => {
+      del.run(req.user!.id);
+      for (const area of data.interests!) if (valid.includes(area)) ins.run(req.user!.id, area);
+    });
+  }
+  res.json({ user: publicUser(req.user!.id, true) });
+}));
+
+authRouter.post('/change-password', requireAuth, asyncHandler(async (req, res) => {
+  const data = z.object({ current: z.string().min(1), next: passwordSchema }).parse(req.body);
+  const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user!.id) as { password_hash: string };
+  if (!bcrypt.compareSync(data.current, row.password_hash)) throw badRequest('La contraseña actual no es correcta.');
+  db.prepare('UPDATE users SET password_hash = ?, updated_at = datetime(\'now\') WHERE id = ?')
+    .run(bcrypt.hashSync(data.next, 11), req.user!.id);
+  revokeAllSessions(req.user!.id);
+  logAudit(req.user!.id, 'auth.change_password', {}, req.ip);
+  clearRefreshCookie(res);
+  res.json({ ok: true, message: 'Contraseña actualizada. Vuelve a iniciar sesión.' });
+}));
+
+authRouter.get('/sessions', requireAuth, asyncHandler(async (req, res) => {
+  const rows = db.prepare(`
+    SELECT id, user_agent, ip, created_at, expires_at FROM sessions
+    WHERE user_id = ? AND revoked_at IS NULL AND expires_at > datetime('now')
+    ORDER BY created_at DESC
+  `).all(req.user!.id);
+  res.json({ sessions: rows });
+}));

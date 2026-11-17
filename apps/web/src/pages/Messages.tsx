@@ -1,0 +1,1835 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  Archive, ArrowLeft, BellOff, Camera, CheckCheck, Copy, Download, Eye, FileText, Forward,
+  Image as ImageIcon, Info, Lock, MessageSquare, Mic, MoreHorizontal, Paperclip, Pause, Phone,
+  PhoneOff, Pin, Play, Search, Send, Smile, Square, Trash2, Video, VideoOff, Volume2, X, Users, Plus,
+} from 'lucide-react';
+import { toast } from 'sonner';
+import { api, ApiClientError } from '../lib/api';
+import { getSocket } from '../lib/socket';
+import { useAuth } from '../lib/store';
+import type { Conversation, Message } from '../lib/types';
+import { Avatar, Badge, EmptyState, Modal, Skeleton, Tabs } from '../components/ui';
+import { cn, formatBytes, timeAgo } from '../lib/utils';
+
+type ConversationsResponse = { conversations: Conversation[] };
+type ConversationResponse = { conversation: Conversation };
+type MessagesResponse = { messages: Message[]; hasMore: boolean };
+type StudentsResponse = { users: Array<{ id: string; name: string; avatarUrl?: string; university?: string; cycle?: string }> };
+type SearchResponse = { messages: Message[] };
+type StickerPack = { id: string; name: string; description?: string | null; sticker_count?: number };
+type Sticker = { id: string; pack_id: string; name: string; mime: string; size: number; keywords?: string; url: string };
+type ListFilter = 'all' | 'unread' | 'pinned' | 'archived';
+
+const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '🙏'];
+const MORE_EMOJIS = [
+  '😀', '😅', '🥹', '😍', '😎', '🤔', '😴', '😭',
+  '😡', '🤝', '👏', '🔥', '✨', '🎉', '💡', '⚖️',
+  '📚', '✅', '❌', '⏰', '🙌', '🤣', '😇', '🥳',
+];
+
+function formatClock(value: number) {
+  const seconds = Math.max(0, Math.floor(Number(value) || 0));
+  return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
+  return (
+    <div className="grid max-h-52 w-[15.5rem] grid-cols-8 gap-0.5 overflow-y-auto rounded-xl border border-line/70 bg-white/95 p-1.5 shadow-lift backdrop-blur-xl dark:bg-white/[.1]">
+      {MORE_EMOJIS.map((emoji) => (
+        <button
+          key={emoji}
+          type="button"
+          onClick={() => onPick(emoji)}
+          className="rounded-md px-0.5 py-0.5 text-[15px] transition-transform hover:scale-110 hover:bg-fg/[.07]"
+          aria-label={`Reacción ${emoji}`}
+        >
+          {emoji}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function AudioNote({ src, name }: { src: string; name?: string }) {
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const [playing, setPlaying] = useState(false);
+  const [current, setCurrent] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [rate, setRate] = useState(1);
+
+  const toggle = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (audio.paused) void audio.play().catch(() => {});
+    else audio.pause();
+  };
+
+  const seek = (value: number) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.currentTime = value;
+    setCurrent(value);
+  };
+
+  const cycleRate = () => {
+    const next = rate === 1 ? 1.5 : rate === 1.5 ? 2 : 1;
+    setRate(next);
+    if (audioRef.current) audioRef.current.playbackRate = next;
+  };
+
+  return (
+    <div className="flex w-64 max-w-full items-center gap-1.5 rounded-xl border border-line/70 bg-fg/[.03] px-2 py-1.5 dark:bg-white/[.06]">
+      <audio
+        ref={audioRef}
+        src={src}
+        preload="metadata"
+        onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
+        onTimeUpdate={(event) => setCurrent(event.currentTarget.currentTime)}
+        onEnded={() => { setPlaying(false); setCurrent(0); }}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+      />
+      <button type="button" onClick={toggle} className="rounded-full p-1 text-fg/70 hover:bg-fg/10 hover:text-fg" aria-label={playing ? 'Pausar' : 'Reproducir'}>
+        {playing ? <Pause size={13} /> : <Play size={13} />}
+      </button>
+      <input
+        type="range"
+        min={0}
+        max={duration || 1}
+        step={0.1}
+        value={Math.min(current, duration || 1)}
+        onChange={(event) => seek(Number(event.target.value))}
+        className="h-1 min-w-0 flex-1 cursor-pointer accent-current"
+        aria-label="Progreso de la nota de voz"
+      />
+      <span className="shrink-0 text-[9px] tabular-nums text-fg/45">{formatClock(duration ? duration - current : 0)}</span>
+      <button type="button" onClick={cycleRate} className="shrink-0 rounded-md px-1 py-0.5 text-[9px] font-semibold text-fg/55 hover:bg-fg/10" title="Velocidad de reproducción">
+        {rate}x
+      </button>
+      <a href={src} download={name ?? 'nota-de-voz.webm'} className="shrink-0 rounded-md p-1 text-fg/45 hover:bg-fg/10 hover:text-fg" title="Descargar nota de voz" aria-label="Descargar nota de voz">
+        <Download size={12} />
+      </a>
+    </div>
+  );
+}
+
+/* ─────────────────────────── Llamadas WebRTC ─────────────────────────── */
+
+type CallKind = 'audio' | 'video';
+type ActiveCall = {
+  callId: string;
+  kind: CallKind;
+  peerId: string;
+  peerName: string;
+  status: 'calling' | 'ringing' | 'active';
+};
+type IncomingCall = { callId: string; from: { id: string; name: string }; conversationId: string; kind: CallKind };
+
+function useCallController() {
+  const socket = getSocket();
+  const [active, setActive] = useState<ActiveCall | null>(null);
+  const [incoming, setIncoming] = useState<IncomingCall | null>(null);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [muted, setMuted] = useState(false);
+  const [cameraOn, setCameraOn] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [iceServers, setIceServers] = useState<RTCIceServer[]>([{ urls: 'stun:stun.l.google.com:19302' }]);
+
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const localRef = useRef<MediaStream | null>(null);
+  const activeRef = useRef<ActiveCall | null>(null);
+  const pendingOfferRef = useRef<{ type: 'offer'; sdp: string } | null>(null);
+  const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
+  const startedAtRef = useRef(0);
+
+  useEffect(() => { activeRef.current = active; }, [active]);
+
+  useEffect(() => {
+    api<{ iceServers: RTCIceServer[] }>('/system/ice')
+      .then((res) => { if (res.iceServers?.length) setIceServers(res.iceServers); })
+      .catch(() => { /* STUN por defecto */ });
+  }, []);
+
+  const cleanup = useCallback(() => {
+    try { pcRef.current?.getSenders().forEach((s) => s.track?.stop()); } catch { /* noop */ }
+    pcRef.current?.close();
+    pcRef.current = null;
+    localRef.current?.getTracks().forEach((t) => t.stop());
+    localRef.current = null;
+    setLocalStream(null);
+    setRemoteStream(null);
+    setMuted(false);
+    setCameraOn(true);
+    pendingOfferRef.current = null;
+    pendingCandidatesRef.current = [];
+  }, []);
+
+  const createPeer = useCallback((peerId: string, callId: string) => {
+    const pc = new RTCPeerConnection({ iceServers });
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        socket?.emit('call:signal', { to: peerId, callId, signal: { candidate: event.candidate.toJSON() } });
+      }
+    };
+    pc.ontrack = (event) => {
+      setRemoteStream(event.streams[0] ?? new MediaStream([event.track]));
+    };
+    pcRef.current = pc;
+    return pc;
+  }, [iceServers, socket]);
+
+  const getMedia = useCallback(async (kind: CallKind) => {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: kind === 'video' ? { width: { ideal: 1280 }, height: { ideal: 720 } } : false,
+    });
+    localRef.current = stream;
+    setLocalStream(stream);
+    return stream;
+  }, []);
+
+  const start = useCallback(async (peer: { id: string; name: string }, kind: CallKind, conversationId: string) => {
+    if (!socket) { setError('La conexión en tiempo real no está disponible.'); return; }
+    const callId = crypto.randomUUID();
+    setError(null);
+    setActive({ callId, kind, peerId: peer.id, peerName: peer.name, status: 'calling' });
+    startedAtRef.current = Date.now();
+    try {
+      const stream = await getMedia(kind);
+      const pc = createPeer(peer.id, callId);
+      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+      socket.emit('call:invite', { callId, to: peer.id, conversationId, kind });
+    } catch {
+      setError('No se pudo acceder al micrófono o a la cámara. Revisa los permisos del navegador.');
+      cleanup();
+      setActive(null);
+    }
+  }, [cleanup, createPeer, getMedia, socket]);
+
+  const accept = useCallback(async () => {
+    if (!incoming) return;
+    const call = incoming;
+    setIncoming(null);
+    setError(null);
+    setActive({ callId: call.callId, kind: call.kind, peerId: call.from.id, peerName: call.from.name, status: 'ringing' });
+    startedAtRef.current = Date.now();
+    try {
+      const stream = await getMedia(call.kind);
+      const pc = createPeer(call.from.id, call.callId);
+      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+      socket?.emit('call:accept', { callId: call.callId, to: call.from.id });
+      if (pendingOfferRef.current) {
+        await pc.setRemoteDescription(pendingOfferRef.current);
+        pendingOfferRef.current = null;
+        for (const candidate of pendingCandidatesRef.current) await pc.addIceCandidate(candidate).catch(() => {});
+        pendingCandidatesRef.current = [];
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket?.emit('call:signal', { to: call.from.id, callId: call.callId, signal: { type: 'answer', sdp: answer.sdp } });
+        setActive((current) => (current ? { ...current, status: 'active' } : current));
+      }
+    } catch {
+      setError('No se pudo acceder al micrófono o a la cámara.');
+      cleanup();
+      setActive(null);
+    }
+  }, [cleanup, createPeer, getMedia, incoming, socket]);
+
+  const decline = useCallback(() => {
+    if (!incoming) return;
+    socket?.emit('call:decline', { callId: incoming.callId, to: incoming.from.id });
+    setIncoming(null);
+  }, [incoming, socket]);
+
+  const end = useCallback(() => {
+    const current = activeRef.current;
+    if (current && socket) {
+      socket.emit('call:end', {
+        callId: current.callId,
+        to: current.peerId,
+        durationS: Math.max(0, Math.round((Date.now() - startedAtRef.current) / 1000)),
+      });
+    }
+    cleanup();
+    setActive(null);
+  }, [cleanup, socket]);
+
+  const toggleMute = useCallback(() => {
+    const tracks = localRef.current?.getAudioTracks() ?? [];
+    const next = !muted;
+    tracks.forEach((track) => { track.enabled = !next; });
+    setMuted(next);
+  }, [muted]);
+
+  const toggleCamera = useCallback(() => {
+    const tracks = localRef.current?.getVideoTracks() ?? [];
+    const next = !cameraOn;
+    tracks.forEach((track) => { track.enabled = next; });
+    setCameraOn(next);
+  }, [cameraOn]);
+
+  useEffect(() => {
+    if (!socket) return;
+
+    const onIncoming = (payload: IncomingCall) => {
+      if (activeRef.current) {
+        socket.emit('call:decline', { callId: payload.callId, to: payload.from.id });
+        return;
+      }
+      setIncoming(payload);
+    };
+
+    const onAccepted = async (payload: { callId: string; by: string }) => {
+      const current = activeRef.current;
+      if (!current || current.callId !== payload.callId) return;
+      const pc = pcRef.current;
+      if (!pc) return;
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit('call:signal', { to: current.peerId, callId: current.callId, signal: { type: 'offer', sdp: offer.sdp } });
+      setActive((value) => (value ? { ...value, status: 'active' } : value));
+    };
+
+    const onSignal = async (payload: { from: string; callId: string; signal: any }) => {
+      const signal = payload.signal;
+      if (!signal) return;
+
+      if (signal.candidate) {
+        const pc = pcRef.current;
+        if (pc?.remoteDescription) await pc.addIceCandidate(signal.candidate).catch(() => {});
+        else pendingCandidatesRef.current.push(signal.candidate);
+        return;
+      }
+
+      if (signal.type === 'offer') {
+        const pc = pcRef.current;
+        if (!pc) {
+          pendingOfferRef.current = { type: 'offer', sdp: signal.sdp };
+          return;
+        }
+        await pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
+        for (const candidate of pendingCandidatesRef.current) await pc.addIceCandidate(candidate).catch(() => {});
+        pendingCandidatesRef.current = [];
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('call:signal', { to: payload.from, callId: payload.callId, signal: { type: 'answer', sdp: answer.sdp } });
+        setActive((value) => (value ? { ...value, status: 'active' } : value));
+        return;
+      }
+
+      if (signal.type === 'answer') {
+        await pcRef.current?.setRemoteDescription({ type: 'answer', sdp: signal.sdp }).catch(() => {});
+        setActive((value) => (value ? { ...value, status: 'active' } : value));
+      }
+    };
+
+    const onDeclined = (payload: { callId: string }) => {
+      if (activeRef.current?.callId !== payload.callId) return;
+      toast.info('La llamada fue rechazada.');
+      cleanup();
+      setActive(null);
+    };
+
+    const onEnded = (payload: { callId: string }) => {
+      setIncoming((current) => (current?.callId === payload.callId ? null : current));
+      if (activeRef.current?.callId !== payload.callId) return;
+      cleanup();
+      setActive(null);
+    };
+
+    socket.on('call:incoming', onIncoming);
+    socket.on('call:accepted', onAccepted);
+    socket.on('call:signal', onSignal);
+    socket.on('call:declined', onDeclined);
+    socket.on('call:ended', onEnded);
+
+    return () => {
+      socket.off('call:incoming', onIncoming);
+      socket.off('call:accepted', onAccepted);
+      socket.off('call:signal', onSignal);
+      socket.off('call:declined', onDeclined);
+      socket.off('call:ended', onEnded);
+    };
+  }, [cleanup, socket]);
+
+  return { active, incoming, localStream, remoteStream, muted, cameraOn, error, start, accept, decline, end, toggleMute, toggleCamera, setError };
+}
+
+type CallController = ReturnType<typeof useCallController>;
+
+function CallLayer({ call }: { call: CallController }) {
+  const [seconds, setSeconds] = useState(0);
+
+  useEffect(() => {
+    if (!call.active) { setSeconds(0); return; }
+    const timer = window.setInterval(() => setSeconds((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [call.active]);
+
+  if (!call.active && !call.incoming) return null;
+
+  const clock = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+
+  if (call.incoming && !call.active) {
+    return (
+      <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/45 p-4 backdrop-blur-md">
+        <div className="glass w-full max-w-sm rounded-3xl p-7 text-center">
+          <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full border border-white/50 bg-white/40 dark:border-white/15 dark:bg-white/[.06]">
+            <Avatar name={call.incoming.from.name} size={64} />
+          </div>
+          <p className="mt-4 font-display text-xl text-fg/95">{call.incoming.from.name}</p>
+          <p className="mt-1 text-[12px] text-fg/40">
+            Llamada {call.incoming.kind === 'video' ? 'de video' : 'de voz'} entrante
+          </p>
+          <div className="mt-7 flex items-center justify-center gap-4">
+            <button onClick={call.decline} className="flex h-14 w-14 items-center justify-center rounded-full border border-fg/15 bg-white/60 text-fg shadow-sm transition-transform hover:scale-105 dark:bg-white/[.06]" aria-label="Rechazar">
+              <PhoneOff size={22} />
+            </button>
+            <button onClick={call.accept} className="flex h-14 w-14 items-center justify-center rounded-full bg-fg text-paper shadow-[0_14px_30px_-18px_rgba(0,0,0,.9)] transition-transform hover:scale-105" aria-label="Aceptar">
+              {call.incoming.kind === 'video' ? <Video size={22} /> : <Phone size={22} />}
+            </button>
+          </div>
+          <p className="mt-5 text-[10px] text-fg/25">Llamada P2P cifrada por WebRTC · requiere permisos del navegador</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!call.active) return null;
+  const video = call.active.kind === 'video';
+
+  return (
+    <div className="fixed inset-0 z-[95] flex flex-col bg-[#0a0a0b] text-white backdrop-blur-xl">
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(900px_600px_at_50%_-10%,rgba(255,255,255,.08),transparent_65%)]" />
+      <div className="flex items-center justify-between px-5 py-4">
+        <div className="flex items-center gap-3">
+          <Avatar name={call.active.peerName} size={36} />
+          <div>
+            <p className="text-[14px] font-medium text-white/90">{call.active.peerName}</p>
+            <p className="text-[11px] text-white/40">
+              {call.active.status === 'active' ? `En llamada · ${clock}` : call.active.status === 'ringing' ? 'Conectando…' : 'Llamando…'}
+            </p>
+          </div>
+        </div>
+        <Badge tone={call.active.status === 'active' ? 'success' : 'warn'}>
+          {video ? 'Video' : 'Voz'}
+        </Badge>
+      </div>
+
+      <div className="relative flex flex-1 items-center justify-center overflow-hidden px-4">
+        {video ? (
+          <>
+            <video
+              ref={(element) => { if (element) element.srcObject = call.remoteStream; }}
+              autoPlay
+              playsInline
+              className="max-h-full w-full max-w-5xl rounded-2xl bg-black object-contain"
+            />
+            <video
+              ref={(element) => { if (element) element.srcObject = call.localStream; }}
+              autoPlay
+              playsInline
+              muted
+              className="absolute bottom-4 right-6 h-32 w-24 rounded-xl border border-white/15 bg-black object-cover shadow-lift sm:h-40 sm:w-28"
+            />
+          </>
+        ) : (
+          <div className="text-center">
+            <div className="mx-auto flex h-32 w-32 items-center justify-center rounded-full border border-white/15 bg-white/[.05]">
+              <Avatar name={call.active.peerName} size={112} />
+            </div>
+            <p className="mt-5 font-display text-2xl text-white/90">{call.active.peerName}</p>
+            <p className="mt-1 text-[12px] text-white/35">{call.active.status === 'active' ? `En llamada · ${clock}` : 'Estableciendo conexión…'}</p>
+            {call.remoteStream && <p className="mt-3 flex items-center justify-center gap-1.5 text-[11px] text-white/60"><Volume2 size={12} /> Audio conectado</p>}
+          </div>
+        )}
+      </div>
+
+      {call.error && (
+        <p className="relative mx-auto mb-3 max-w-md rounded-xl border border-white/20 bg-white/[.06] px-4 py-2 text-center text-[11.5px] text-white/70">
+          {call.error}
+        </p>
+      )}
+
+      <div className="relative flex items-center justify-center gap-3 px-5 pb-8 pt-4">
+        <button
+          onClick={call.toggleMute}
+          className={cn('flex h-12 w-12 items-center justify-center rounded-full border transition-colors', call.muted ? 'border-transparent bg-white text-[#0a0a0b]' : 'border-white/15 bg-white/[.06] text-white/80 hover:bg-white/[.12]')}
+          aria-label={call.muted ? 'Activar micrófono' : 'Silenciar micrófono'}
+        >
+          {call.muted ? <Mic size={19} /> : <Mic size={19} />}
+        </button>
+        {video && (
+          <button
+            onClick={call.toggleCamera}
+            className={cn('flex h-12 w-12 items-center justify-center rounded-full border transition-colors', !call.cameraOn ? 'border-transparent bg-white text-[#0a0a0b]' : 'border-white/15 bg-white/[.06] text-white/80 hover:bg-white/[.12]')}
+            aria-label={call.cameraOn ? 'Apagar cámara' : 'Encender cámara'}
+          >
+            {call.cameraOn ? <Camera size={19} /> : <VideoOff size={19} />}
+          </button>
+        )}
+        <button onClick={call.end} className="flex h-14 w-14 items-center justify-center rounded-full bg-white text-[#0a0a0b] shadow-[0_16px_34px_-18px_rgba(255,255,255,.5)] transition-transform hover:scale-105" aria-label="Finalizar llamada">
+          <PhoneOff size={22} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────── Mensajería ─────────────────────────── */
+
+export default function Messages() {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const socket = getSocket();
+  const call = useCallController();
+
+  const [search, setSearch] = useState('');
+  const [listFilter, setListFilter] = useState<ListFilter>('all');
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+  const [replyTo, setReplyTo] = useState<Message | null>(null);
+  const [editing, setEditing] = useState<Message | null>(null);
+  const [editDraft, setEditDraft] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [recordSeconds, setRecordSeconds] = useState(0);
+  const [typingName, setTypingName] = useState<string | null>(null);
+  const [online, setOnline] = useState<Set<string>>(new Set());
+  const [infoOpen, setInfoOpen] = useState(false);
+  const [newChatOpen, setNewChatOpen] = useState(false);
+  const [studentSearch, setStudentSearch] = useState('');
+  const [reactionFor, setReactionFor] = useState<string | null>(null);
+  const [toolbarFor, setToolbarFor] = useState<string | null>(null);
+  const [forwardFor, setForwardFor] = useState<Message | null>(null);
+  const [composerEmojiOpen, setComposerEmojiOpen] = useState(false);
+  const [stickerOpen, setStickerOpen] = useState(false);
+  const [activePackId, setActivePackId] = useState<string | null>(null);
+  const [newPackName, setNewPackName] = useState('');
+  const [stickerUploading, setStickerUploading] = useState(false);
+  const [oneTimeImages, setOneTimeImages] = useState<Record<string, string>>({});
+  const [headerSearchOpen, setHeaderSearchOpen] = useState(false);
+  const [headerSearch, setHeaderSearch] = useState('');
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
+
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const oneTimeFileRef = useRef<HTMLInputElement>(null);
+  const stickerFileRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const recordTimerRef = useRef<number | null>(null);
+  const discardRecordingRef = useRef(false);
+  const typingTimerRef = useRef<number | null>(null);
+  const typingClearRef = useRef<number | null>(null);
+  const longPressRef = useRef<number | null>(null);
+  const highlightTimerRef = useRef<number | null>(null);
+  const oneTimeUrlsRef = useRef<Set<string>>(new Set());
+
+  const conversationsQuery = useQuery({
+    queryKey: ['conversations'],
+    queryFn: () => api<ConversationsResponse>('/messaging/conversations'),
+  });
+
+  const conversationQuery = useQuery({
+    queryKey: ['conversation', id],
+    queryFn: () => api<ConversationResponse>(`/messaging/conversations/${id}`),
+    enabled: Boolean(id),
+  });
+
+  const messagesQuery = useQuery({
+    queryKey: ['messages', id],
+    queryFn: () => api<MessagesResponse>(`/messaging/conversations/${id}/messages?limit=60`),
+    enabled: Boolean(id),
+  });
+
+  const studentsQuery = useQuery({
+    queryKey: ['message-students', studentSearch],
+    queryFn: () => api<StudentsResponse>(`/users?q=${encodeURIComponent(studentSearch)}&limit=20`),
+    enabled: newChatOpen,
+  });
+
+  const packsQuery = useQuery({
+    queryKey: ['sticker-packs'],
+    queryFn: () => api<{ packs: StickerPack[] }>('/stickers/packs'),
+    staleTime: 60_000,
+  });
+
+  const stickersQuery = useQuery({
+    queryKey: ['sticker-stickers'],
+    queryFn: async () => {
+      const packs = await api<{ packs: StickerPack[] }>('/stickers/packs');
+      const lists = await Promise.all(
+        packs.packs.map((pack) => api<{ stickers: Sticker[] }>(`/stickers/packs/${pack.id}/stickers`)),
+      );
+      return lists.flatMap((list) => list.stickers);
+    },
+    staleTime: 60_000,
+  });
+
+  const messageSearchQuery = useQuery({
+    queryKey: ['message-search', id, headerSearch.trim()],
+    queryFn: () => api<SearchResponse>(`/messaging/conversations/${id}/search?q=${encodeURIComponent(headerSearch.trim())}`),
+    enabled: Boolean(id && headerSearch.trim()),
+  });
+
+  const conversation = conversationQuery.data?.conversation;
+  const messages = messagesQuery.data?.messages ?? [];
+
+  const otherMember = useMemo(
+    () => conversation?.type === 'direct' ? conversation.members.find((member) => member.id !== user?.id) ?? null : null,
+    [conversation, user?.id],
+  );
+
+  const stickerByBody = useMemo(() => {
+    const map = new Map<string, Sticker>();
+    for (const sticker of stickersQuery.data ?? []) {
+      if (!map.has(sticker.name)) map.set(sticker.name, sticker);
+    }
+    return map;
+  }, [stickersQuery.data]);
+
+  const visibleStickers = useMemo(() => {
+    const all = stickersQuery.data ?? [];
+    const packId = activePackId ?? packsQuery.data?.packs[0]?.id ?? null;
+    return packId ? all.filter((sticker) => sticker.pack_id === packId) : all;
+  }, [activePackId, packsQuery.data, stickersQuery.data]);
+
+  const unreadConversations = (conversationsQuery.data?.conversations ?? []).filter((item) => item.unread > 0).length;
+
+  const filteredConversations = useMemo(() => {
+    const list = conversationsQuery.data?.conversations ?? [];
+    const term = search.trim().toLowerCase();
+    return list
+      .filter((item) => {
+        if (listFilter === 'archived') {
+          if (!item.archived) return false;
+        } else if (item.archived) {
+          return false;
+        }
+        if (listFilter === 'unread' && item.unread <= 0) return false;
+        if (listFilter === 'pinned' && !item.pinned) return false;
+        if (!term) return true;
+        return item.title.toLowerCase().includes(term) ||
+          item.members.some((member) => member.name.toLowerCase().includes(term));
+      })
+      .sort((a, b) =>
+        Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) ||
+        new Date(b.lastMessageAt ?? 0).getTime() - new Date(a.lastMessageAt ?? 0).getTime(),
+      );
+  }, [conversationsQuery.data, listFilter, search]);
+
+  const invalidateChat = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['conversations'] });
+    if (id) {
+      queryClient.invalidateQueries({ queryKey: ['messages', id] });
+      queryClient.invalidateQueries({ queryKey: ['conversation', id] });
+    }
+  }, [id, queryClient]);
+
+  useEffect(() => {
+    setDraft('');
+    setReplyTo(null);
+    setEditing(null);
+    setTypingName(null);
+    setHeaderSearch('');
+    setHeaderSearchOpen(false);
+    setHighlightedId(null);
+    setReactionFor(null);
+    setToolbarFor(null);
+    setMenuFor(null);
+    setComposerEmojiOpen(false);
+    setStickerOpen(false);
+    setForwardFor(null);
+    setOneTimeImages({});
+  }, [id]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setMenuFor(null);
+      setToolbarFor(null);
+      setReactionFor(null);
+      setComposerEmojiOpen(false);
+      setStickerOpen(false);
+      setHeaderSearchOpen(false);
+      setForwardFor(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  useEffect(() => {
+    if (!menuFor) return;
+    const close = (event: MouseEvent) => {
+      if (!(event.target as HTMLElement).closest('[data-conversation-menu]')) setMenuFor(null);
+    };
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [menuFor]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages.length, id]);
+
+  useEffect(() => {
+    if (!id || !messagesQuery.data) return;
+    api(`/messaging/conversations/${id}/read`, { method: 'POST' })
+      .then(() => queryClient.invalidateQueries({ queryKey: ['conversations'] }))
+      .catch(() => {});
+  }, [id, messagesQuery.data, queryClient]);
+
+  useEffect(() => {
+    if (!socket) return;
+    socket.emit('presence:sync');
+
+    const onPresenceList = (payload: { online: string[] }) => setOnline(new Set(payload.online));
+    const onPresenceUpdate = (payload: { userId: string; online: boolean }) => {
+      setOnline((current) => {
+        const next = new Set(current);
+        if (payload.online) next.add(payload.userId);
+        else next.delete(payload.userId);
+        return next;
+      });
+    };
+    const onNewMessage = (message: Message) => {
+      if (message.conversationId === id) {
+        queryClient.setQueryData<MessagesResponse>(['messages', id], (current) => {
+          if (!current) return current;
+          if (current.messages.some((item) => item.id === message.id)) return current;
+          return { ...current, messages: [...current.messages, message] };
+        });
+        setTypingName(null);
+      }
+      invalidateChat();
+    };
+    const onMessageUpdated = () => invalidateChat();
+    const onMessageDeleted = () => invalidateChat();
+    const onReaction = () => invalidateChat();
+    const onNewConversation = () => {
+      void queryClient.invalidateQueries({ queryKey: ['conversations'] });
+    };
+    const onRead = () => invalidateChat();
+    const onTyping = (payload: { conversationId: string; userId: string; name: string; typing: boolean }) => {
+      if (payload.conversationId !== id || payload.userId === user?.id) return;
+      setTypingName(payload.typing ? payload.name : null);
+      if (typingClearRef.current) window.clearTimeout(typingClearRef.current);
+      if (payload.typing) {
+        typingClearRef.current = window.setTimeout(() => setTypingName(null), 2600);
+      }
+    };
+
+    socket.on('presence:list', onPresenceList);
+    socket.on('presence:update', onPresenceUpdate);
+    socket.on('message:new', onNewMessage);
+    socket.on('message:updated', onMessageUpdated);
+    socket.on('message:deleted', onMessageDeleted);
+    socket.on('message:reaction', onReaction);
+    socket.on('reaction:new', onReaction);
+    socket.on('conversation:new', onNewConversation);
+    socket.on('conversation:activity', onNewConversation);
+    socket.on('conversation:read', onRead);
+    socket.on('typing', onTyping);
+
+    return () => {
+      socket.off('presence:list', onPresenceList);
+      socket.off('presence:update', onPresenceUpdate);
+      socket.off('message:new', onNewMessage);
+      socket.off('message:updated', onMessageUpdated);
+      socket.off('message:deleted', onMessageDeleted);
+      socket.off('message:reaction', onReaction);
+      socket.off('reaction:new', onReaction);
+      socket.off('conversation:new', onNewConversation);
+      socket.off('conversation:activity', onNewConversation);
+      socket.off('conversation:read', onRead);
+      socket.off('typing', onTyping);
+    };
+  }, [id, invalidateChat, queryClient, socket, user?.id]);
+
+  useEffect(() => () => {
+    if (recordTimerRef.current) window.clearInterval(recordTimerRef.current);
+    if (typingTimerRef.current) window.clearTimeout(typingTimerRef.current);
+    if (typingClearRef.current) window.clearTimeout(typingClearRef.current);
+    if (longPressRef.current) window.clearTimeout(longPressRef.current);
+    if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+    oneTimeUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    oneTimeUrlsRef.current.clear();
+    recorderRef.current?.stream.getTracks().forEach((track) => track.stop());
+  }, []);
+
+  const handleDraft = (value: string) => {
+    setDraft(value);
+    if (!id || !socket) return;
+    socket.emit('typing', { conversationId: id, typing: Boolean(value.trim()) });
+    if (typingTimerRef.current) window.clearTimeout(typingTimerRef.current);
+    typingTimerRef.current = window.setTimeout(() => {
+      socket.emit('typing', { conversationId: id, typing: false });
+    }, 1800);
+  };
+
+  const insertEmoji = (emoji: string) => {
+    handleDraft(`${draft}${emoji}`);
+    setComposerEmojiOpen(false);
+    textareaRef.current?.focus();
+  };
+
+  const startLongPress = (messageId: string) => {
+    if (longPressRef.current) window.clearTimeout(longPressRef.current);
+    longPressRef.current = window.setTimeout(() => setToolbarFor(messageId), 500);
+  };
+
+  const endLongPress = () => {
+    if (longPressRef.current) {
+      window.clearTimeout(longPressRef.current);
+      longPressRef.current = null;
+    }
+  };
+
+  const updatePreferences = async (
+    item: Conversation,
+    patch: Partial<Pick<Conversation, 'pinned' | 'archived' | 'muted'>>,
+  ) => {
+    setMenuFor(null);
+    try {
+      await api(`/messaging/conversations/${item.id}/preferences`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      });
+      queryClient.setQueryData<ConversationsResponse>(['conversations'], (current) => current ? {
+        ...current,
+        conversations: current.conversations.map((entry) => entry.id === item.id ? { ...entry, ...patch } : entry),
+      } : current);
+      await queryClient.invalidateQueries({ queryKey: ['conversations'] });
+    } catch (error) {
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo actualizar la conversación.');
+    }
+  };
+
+  const copyMessage = async (message: Message) => {
+    setToolbarFor(null);
+    try {
+      if (!navigator.clipboard) throw new Error('Portapapeles no disponible.');
+      await navigator.clipboard.writeText(message.body ?? '');
+      toast.success('Mensaje copiado.');
+    } catch {
+      toast.error('No se pudo copiar el mensaje.');
+    }
+  };
+
+  const openOneTime = async (message: Message) => {
+    setToolbarFor(null);
+    try {
+      const response = await api<Response>(`/messaging/messages/${message.id}/one-time`, {}, { raw: true });
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      oneTimeUrlsRef.current.add(url);
+      setOneTimeImages((current) => ({ ...current, [message.id]: url }));
+      queryClient.setQueryData<MessagesResponse>(['messages', id], (current) => current ? {
+        ...current,
+        messages: current.messages.map((entry) => entry.id === message.id ? { ...entry, viewed: true } : entry),
+      } : current);
+      void queryClient.invalidateQueries({ queryKey: ['messages', id] });
+    } catch (error) {
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo abrir la foto.');
+    }
+  };
+
+  const jumpToMessage = async (messageId: string) => {
+    if (!id) return;
+    const inCache = () => (queryClient.getQueryData<MessagesResponse>(['messages', id])?.messages ?? [])
+      .some((entry) => entry.id === messageId);
+    let found = inCache();
+    let attempts = 0;
+    while (!found && attempts < 6) {
+      const current = queryClient.getQueryData<MessagesResponse>(['messages', id]);
+      const oldest = current?.messages[0];
+      if (!current?.hasMore || !oldest?.createdAt) break;
+      const older = await api<MessagesResponse>(
+        `/messaging/conversations/${id}/messages?before=${encodeURIComponent(oldest.createdAt)}&limit=100`,
+      );
+      if (!older.messages.length) break;
+      queryClient.setQueryData<MessagesResponse>(['messages', id], (previous) => previous ? {
+        ...older,
+        messages: [...older.messages, ...previous.messages],
+      } : previous);
+      found = inCache();
+      attempts += 1;
+    }
+    if (!found) {
+      toast.info('No se pudo cargar ese mensaje.');
+      return;
+    }
+    setHeaderSearchOpen(false);
+    window.setTimeout(() => {
+      document.getElementById(`message-${messageId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setHighlightedId(messageId);
+      if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = window.setTimeout(() => setHighlightedId(null), 2200);
+    }, 100);
+  };
+
+  const send = async () => {
+    if (!id || !draft.trim()) return;
+    const text = draft.trim();
+    setDraft('');
+    try {
+      await api(`/messaging/conversations/${id}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({ body: text, kind: 'text', replyTo: replyTo?.id ?? null }),
+      });
+      setReplyTo(null);
+      invalidateChat();
+      socket?.emit('typing', { conversationId: id, typing: false });
+    } catch (error) {
+      setDraft(text);
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo enviar el mensaje.');
+    }
+  };
+
+  const uploadAndSend = async (file: File, kind: 'image' | 'file' | 'audio') => {
+    if (!id) return;
+    setUploading(true);
+    try {
+      const form = new FormData();
+      form.append('files', file);
+      const uploaded = await api<{ documents: Array<{ id: string; name: string }> }>('/documents', { method: 'POST', body: form });
+      const document = uploaded.documents[0];
+      await api(`/messaging/conversations/${id}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({ kind, attachmentId: document.id, body: document.name, replyTo: replyTo?.id ?? null }),
+      });
+      setReplyTo(null);
+      invalidateChat();
+    } catch (error) {
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo enviar el archivo.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const uploadAndSendOneTime = async (file: File) => {
+    if (!id) return;
+    if (!file.type.startsWith('image/')) {
+      toast.error('La foto única debe ser una imagen.');
+      return;
+    }
+    setUploading(true);
+    try {
+      const form = new FormData();
+      form.append('files', file);
+      const uploaded = await api<{ documents: Array<{ id: string; name: string }> }>('/documents', { method: 'POST', body: form });
+      const document = uploaded.documents[0];
+      await api(`/messaging/conversations/${id}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({
+          body: 'Foto única',
+          kind: 'image',
+          attachmentId: document.id,
+          oneTime: true,
+          replyTo: replyTo?.id ?? null,
+        }),
+      });
+      setReplyTo(null);
+      invalidateChat();
+    } catch (error) {
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo enviar la foto única.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const toggleRecording = async () => {
+    if (recording) {
+      recorderRef.current?.stop();
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      toast.error('Tu navegador no permite grabar notas de voz.');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      chunksRef.current = [];
+      discardRecordingRef.current = false;
+      recorder.ondataavailable = (event) => { if (event.data.size > 0) chunksRef.current.push(event.data); };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((track) => track.stop());
+        if (recordTimerRef.current) window.clearInterval(recordTimerRef.current);
+        setRecording(false);
+        setRecordSeconds(0);
+        const discarded = discardRecordingRef.current;
+        discardRecordingRef.current = false;
+        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        if (discarded) { toast.info('Grabación cancelada.'); return; }
+        if (blob.size < 600) { toast.error('La nota de voz quedó vacía.'); return; }
+        await uploadAndSend(new File([blob], `nota-de-voz-${Date.now()}.webm`, { type: blob.type || 'audio/webm' }), 'audio');
+      };
+      recorder.start();
+      recorderRef.current = recorder;
+      setRecording(true);
+      setRecordSeconds(0);
+      recordTimerRef.current = window.setInterval(() => setRecordSeconds((value) => value + 1), 1000);
+    } catch {
+      toast.error('No se pudo acceder al micrófono.');
+    }
+  };
+
+  const cancelRecording = () => {
+    discardRecordingRef.current = true;
+    recorderRef.current?.stop();
+  };
+
+  const react = async (message: Message, emoji: string) => {
+    setReactionFor(null);
+    try {
+      await api(`/messaging/messages/${message.id}/reactions`, { method: 'POST', body: JSON.stringify({ emoji }) });
+      invalidateChat();
+    } catch (error) {
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo reaccionar.');
+    }
+  };
+
+  const sendSticker = async (sticker: Sticker) => {
+    if (!id) return;
+    try {
+      await api(`/messaging/conversations/${id}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({
+          body: sticker.name,
+          kind: 'image',
+          stickerPack: sticker.pack_id,
+          replyTo: replyTo?.id ?? null,
+        }),
+      });
+      setStickerOpen(false);
+      setReplyTo(null);
+      invalidateChat();
+      socket?.emit('typing', { conversationId: id, typing: false });
+    } catch (error) {
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo enviar el sticker.');
+    }
+  };
+
+  const createPack = async () => {
+    const name = newPackName.trim();
+    if (!name) return;
+    try {
+      const response = await api<{ pack: StickerPack }>('/stickers/packs', {
+        method: 'POST',
+        body: JSON.stringify({ name }),
+      });
+      setActivePackId(response.pack.id);
+      setNewPackName('');
+      await queryClient.invalidateQueries({ queryKey: ['sticker-packs'] });
+      toast.success('Paquete de stickers creado.');
+    } catch (error) {
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo crear el paquete.');
+    }
+  };
+
+  const uploadSticker = async (file: File) => {
+    const packId = activePackId ?? packsQuery.data?.packs[0]?.id;
+    if (!packId) {
+      toast.error('Crea un paquete antes de subir stickers.');
+      return;
+    }
+    if (!file.type.startsWith('image/')) {
+      toast.error('Los stickers deben ser imágenes.');
+      return;
+    }
+    setStickerUploading(true);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('keywords', file.name.replace(/\.[^.]+$/, '').slice(0, 200));
+      await api(`/stickers/packs/${packId}/stickers`, { method: 'POST', body: form });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['sticker-packs'] }),
+        queryClient.invalidateQueries({ queryKey: ['sticker-stickers'] }),
+      ]);
+      toast.success('Sticker agregado al paquete.');
+    } catch (error) {
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo subir el sticker.');
+    } finally {
+      setStickerUploading(false);
+    }
+  };
+
+  const sendForward = async (targetId: string) => {
+    if (!forwardFor) return;
+    const ownAttachment = forwardFor.sender.id === user?.id ? forwardFor.attachment ?? null : null;
+    const body = forwardFor.body ??
+      (forwardFor.attachment && !ownAttachment ? `📎 ${forwardFor.attachment.name}` : 'Mensaje reenviado');
+    try {
+      await api(`/messaging/conversations/${targetId}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({
+          body,
+          kind: forwardFor.kind,
+          attachmentId: ownAttachment?.id ?? null,
+          stickerPack: forwardFor.stickerPack ?? null,
+        }),
+      });
+      setForwardFor(null);
+      toast.success('Mensaje reenviado.');
+      await queryClient.invalidateQueries({ queryKey: ['conversations'] });
+    } catch (error) {
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo reenviar el mensaje.');
+    }
+  };
+
+  const remove = async (message: Message) => {
+    if (!window.confirm('¿Eliminar este mensaje para todos?')) return;
+    try {
+      await api(`/messaging/messages/${message.id}`, { method: 'DELETE' });
+      invalidateChat();
+    } catch (error) {
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo eliminar.');
+    }
+  };
+
+  const saveEdit = async () => {
+    if (!editing || !editDraft.trim()) return;
+    try {
+      await api(`/messaging/messages/${editing.id}`, { method: 'PATCH', body: JSON.stringify({ body: editDraft.trim() }) });
+      setEditing(null);
+      invalidateChat();
+    } catch (error) {
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo editar.');
+    }
+  };
+
+  const startChat = async (studentId: string) => {
+    try {
+      const response = await api<ConversationResponse>('/messaging/conversations', {
+        method: 'POST',
+        body: JSON.stringify({ type: 'direct', memberIds: [studentId] }),
+      });
+      setNewChatOpen(false);
+      setStudentSearch('');
+      await queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      navigate(`/mensajes/${response.conversation.id}`);
+    } catch (error) {
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo iniciar la conversación.');
+    }
+  };
+
+  const isReadByPeer = (message: Message) => {
+    if (!conversation || conversation.type !== 'direct' || message.sender.id !== user?.id) return false;
+    const peer = conversation.members.find((member) => member.id !== user?.id);
+    if (!peer?.lastReadAt) return false;
+    return new Date(peer.lastReadAt).getTime() >= new Date(message.createdAt).getTime();
+  };
+
+  const list = (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="border-b border-line/70 p-3">
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1">
+            <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg/25" />
+            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar conversación…" className="input !py-2 !text-[12px] pl-9" />
+          </div>
+          <button onClick={() => setNewChatOpen(true)} className="btn btn-primary btn-sm !px-2.5" aria-label="Nueva conversación"><Plus size={15} /></button>
+        </div>
+      </div>
+
+      <div className="border-b border-line/70 px-2 pb-2 pt-2">
+        <Tabs<ListFilter>
+          value={listFilter}
+          onChange={setListFilter}
+          className="flex w-full [&>button]:flex-1 [&>button]:px-1.5 [&>button]:text-[10.5px]"
+          items={[
+            { id: 'all', label: 'Todos' },
+            { id: 'unread', label: 'Sin leer', count: unreadConversations },
+            { id: 'pinned', label: 'Fijados' },
+            { id: 'archived', label: 'Archivados' },
+          ]}
+        />
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        {conversationsQuery.isLoading && (
+          <div className="space-y-2 p-3">{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-16 w-full" />)}</div>
+        )}
+
+        {!conversationsQuery.isLoading && filteredConversations.length === 0 && (
+          <div className="px-4 py-10 text-center">
+            <MessageSquare size={22} className="mx-auto text-fg/20" />
+            <p className="mt-3 text-[12px] text-fg/40">
+              {search.trim() ? 'No encontramos conversaciones con ese nombre.' :
+                listFilter === 'archived' ? 'No tienes conversaciones archivadas.' :
+                  listFilter === 'pinned' ? 'Aún no tienes conversaciones fijadas.' :
+                    'Aún no tienes conversaciones.'}
+            </p>
+            {listFilter === 'all' && !search.trim() && (
+              <button onClick={() => setNewChatOpen(true)} className="btn btn-sm mt-3">Iniciar una conversación</button>
+            )}
+          </div>
+        )}
+
+        {filteredConversations.map((item) => {
+          const peer = item.type === 'direct' ? item.members.find((member) => member.id !== user?.id) : null;
+          const active = item.id === id;
+          const preview = item.lastMessage
+            ? item.lastMessage.deleted
+              ? 'Mensaje eliminado'
+              : item.lastMessage.oneTime
+                ? '🔒 Foto única'
+                : item.lastMessage.stickerPack
+                  ? '🎨 Sticker'
+                  : item.lastMessage.kind === 'image'
+                    ? '📷 Imagen'
+                    : item.lastMessage.kind === 'audio'
+                      ? '🎙️ Nota de voz'
+                      : item.lastMessage.kind === 'file'
+                        ? `📎 ${item.lastMessage.attachment?.name ?? 'Archivo'}`
+                        : item.lastMessage.body ?? '—'
+            : 'Sin mensajes todavía';
+
+          return (
+            <div key={item.id} className="relative" data-conversation-menu>
+              <Link
+                to={`/mensajes/${item.id}`}
+                className={cn(
+                  'flex items-center gap-3 border-b border-line px-3 py-3 transition-colors',
+                  active ? 'bg-fg/[.055] shadow-[inset_0_0_0_1px_rgba(10,10,10,.035)] dark:bg-white/[.08]' : 'hover:bg-fg/[.03]',
+                )}
+              >
+                <span className="relative">
+                  <Avatar name={item.title} url={item.avatarUrl} size={40} />
+                  {peer && online.has(peer.id) && <span className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-paper bg-fg" />}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-baseline gap-2">
+                    <span className="truncate text-[13px] font-medium text-fg/85">{item.title}</span>
+                    {item.pinned && <Pin size={10} className="shrink-0 text-fg/35" />}
+                    {item.muted && <BellOff size={10} className="shrink-0 text-fg/30" />}
+                    <span className="ml-auto shrink-0 text-[9.5px] text-fg/25">{timeAgo(item.lastMessageAt)}</span>
+                  </span>
+                  <span className="mt-0.5 flex items-center gap-1.5">
+                    <span className="truncate text-[11.5px] text-fg/35">{preview}</span>
+                    {item.unread > 0 && (
+                      <span className="ml-auto flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-fg px-1 text-[9px] font-bold text-paper">
+                        {item.unread > 9 ? '9+' : item.unread}
+                      </span>
+                    )}
+                  </span>
+                </span>
+              </Link>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setMenuFor(menuFor === item.id ? null : item.id);
+                }}
+                className="absolute bottom-2 right-1.5 rounded-full p-1 text-fg/30 transition-colors hover:bg-fg/10 hover:text-fg/70"
+                aria-label="Opciones de la conversación"
+                title="Opciones"
+              >
+                <MoreHorizontal size={15} />
+              </button>
+              {menuFor === item.id && (
+                <div
+                  className="absolute right-2 top-10 z-30 w-48 rounded-xl border border-line/80 bg-white/95 p-1 text-[12px] shadow-lift backdrop-blur-xl dark:bg-white/[.1]"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <button
+                    type="button"
+                    onClick={(event) => { event.preventDefault(); void updatePreferences(item, { pinned: !item.pinned }); }}
+                    className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-fg/70 hover:bg-fg/[.06] hover:text-fg"
+                  >
+                    <Pin size={12} /> {item.pinned ? 'Desfijar conversación' : 'Fijar conversación'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(event) => { event.preventDefault(); void updatePreferences(item, { archived: !item.archived }); }}
+                    className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-fg/70 hover:bg-fg/[.06] hover:text-fg"
+                  >
+                    <Archive size={12} /> {item.archived ? 'Sacar del archivo' : 'Archivar conversación'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(event) => { event.preventDefault(); void updatePreferences(item, { muted: !item.muted }); }}
+                    className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-fg/70 hover:bg-fg/[.06] hover:text-fg"
+                  >
+                    <BellOff size={12} /> {item.muted ? 'Activar notificaciones' : 'Silenciar notificaciones'}
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  const chat = id ? (
+    <div className="flex h-full min-h-0 flex-col">
+      <header className="flex items-center gap-3 border-b border-line/70 px-3 py-2.5 sm:px-4">
+        <button onClick={() => navigate('/mensajes')} className="btn btn-ghost btn-sm !px-1.5 lg:hidden" aria-label="Volver"><ArrowLeft size={17} /></button>
+        {conversation ? (
+          <>
+            <span className="relative">
+              <Avatar name={conversation.title} url={conversation.avatarUrl} size={36} />
+              {otherMember && online.has(otherMember.id) && <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-paper bg-fg" />}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[13.5px] font-medium text-fg/90">{conversation.title}</p>
+              <p className="truncate text-[10.5px] text-fg/35">
+                {typingName
+                  ? `${typingName} está escribiendo…`
+                  : otherMember
+                    ? online.has(otherMember.id) ? 'En línea' : otherMember.university ?? 'Estudiante de Derecho'
+                    : `${conversation.members.length} integrantes`}
+              </p>
+            </div>
+            {conversation.type === 'direct' && otherMember && (
+              <>
+                <button onClick={() => call.start(otherMember, 'audio', conversation.id)} className="btn btn-ghost btn-sm !px-2" title="Llamada de voz"><Phone size={15} /></button>
+                <button onClick={() => call.start(otherMember, 'video', conversation.id)} className="btn btn-ghost btn-sm !px-2" title="Llamada de video"><Video size={15} /></button>
+              </>
+            )}
+            <button
+              onClick={() => setHeaderSearchOpen((open) => !open)}
+              className={cn('btn btn-ghost btn-sm !px-2', headerSearchOpen && 'bg-fg/[.08]')}
+              title="Buscar en la conversación"
+              aria-label="Buscar en la conversación"
+            >
+              <Search size={15} />
+            </button>
+            <button onClick={() => setInfoOpen(true)} className="btn btn-ghost btn-sm !px-2" title="Detalles"><Info size={15} /></button>
+          </>
+        ) : (
+          <Skeleton className="h-9 w-48" />
+        )}
+      </header>
+
+      {headerSearchOpen && (
+        <div className="border-b border-line/70 bg-white/40 px-3 py-2.5 dark:bg-white/[.035]">
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg/25" />
+              <input
+                autoFocus
+                value={headerSearch}
+                onChange={(event) => setHeaderSearch(event.target.value)}
+                placeholder="Buscar mensajes en esta conversación…"
+                className="input !py-2 !text-[12px] pl-9"
+              />
+            </div>
+            <button
+              onClick={() => { setHeaderSearch(''); setHeaderSearchOpen(false); }}
+              className="btn btn-ghost btn-sm !px-2"
+              aria-label="Cerrar búsqueda"
+            >
+              <X size={14} />
+            </button>
+          </div>
+          {headerSearch.trim() && (
+            <div className="mt-2 max-h-56 space-y-1 overflow-y-auto">
+              {messageSearchQuery.isLoading && <p className="py-2 text-center text-[11px] text-fg/35">Buscando…</p>}
+              {messageSearchQuery.data?.messages.map((result) => (
+                <button
+                  key={result.id}
+                  onClick={() => void jumpToMessage(result.id)}
+                  className="flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-fg/[.05]"
+                >
+                  <Avatar name={result.sender.name} size={22} />
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-baseline gap-2">
+                      <span className="text-[11px] font-medium text-fg/70">{result.sender.name}</span>
+                      <span className="text-[9px] text-fg/30">
+                        {new Intl.DateTimeFormat('es-PE', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(result.createdAt))}
+                      </span>
+                    </span>
+                    <span className="block truncate text-[11px] text-fg/45">{result.body ?? 'Archivo adjunto'}</span>
+                  </span>
+                </button>
+              ))}
+              {!messageSearchQuery.isLoading && (messageSearchQuery.data?.messages.length ?? 0) === 0 && (
+                <p className="py-2 text-center text-[11px] text-fg/35">Sin coincidencias.</p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="flex-1 space-y-1 overflow-y-auto px-3 py-4 sm:px-5">
+        {messagesQuery.isLoading && (
+          <div className="space-y-3">{[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className={cn('h-12', i % 2 ? 'ml-auto w-2/3' : 'w-1/2')} />)}</div>
+        )}
+
+        {!messagesQuery.isLoading && messages.length === 0 && (
+          <div className="flex h-full flex-col items-center justify-center py-10 text-center">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-line/80 bg-white/45 dark:bg-white/[.05]"><MessageSquare size={22} className="text-fg/40" /></div>
+            <p className="mt-4 font-display text-lg text-fg/85">Empieza la conversación</p>
+            <p className="mt-1 max-w-xs text-[12px] text-fg/35">Los mensajes se entregan en tiempo real. También puedes enviar archivos, imágenes y notas de voz.</p>
+          </div>
+        )}
+
+        {messages.map((message, index) => {
+          const mine = message.sender.id === user?.id;
+          const previous = messages[index - 1];
+          const showDay = !previous || new Date(previous.createdAt).toDateString() !== new Date(message.createdAt).toDateString();
+          const showSender = conversation?.type === 'group' && (!previous || previous.sender.id !== message.sender.id);
+          const sticker = message.stickerPack && message.body ? stickerByBody.get(message.body) : undefined;
+          const oneTimeUrl = oneTimeImages[message.id];
+
+          return (
+            <div key={message.id} id={`message-${message.id}`}>
+              {showDay && (
+                <div className="my-4 flex items-center justify-center">
+                  <span className="rounded-full border border-line bg-fg/[.03] px-3 py-0.5 text-[9.5px] uppercase tracking-[0.12em] text-fg/30">
+                    {new Intl.DateTimeFormat('es-PE', { weekday: 'short', day: 'numeric', month: 'short' }).format(new Date(message.createdAt))}
+                  </span>
+                </div>
+              )}
+
+              <div className={cn('group flex items-end gap-2', mine ? 'flex-row-reverse' : 'flex-row')}>
+                {!mine && <Avatar name={message.sender.name} url={message.sender.avatarUrl} size={26} className={cn(showSender ? '' : 'invisible')} />}
+
+                <div className={cn('relative max-w-[78%] sm:max-w-[68%]', mine ? 'items-end' : 'items-start')}>
+                  {showSender && !mine && <p className="mb-0.5 pl-1 text-[10px] font-medium text-fg/40">{message.sender.name}</p>}
+
+                  <div
+                    onTouchStart={() => startLongPress(message.id)}
+                    onTouchEnd={endLongPress}
+                    onTouchMove={endLongPress}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      setToolbarFor(message.id);
+                    }}
+                    className={cn(
+                      'relative px-3.5 py-2 text-[13px] leading-relaxed transition-shadow',
+                      mine ? 'bubble-me' : 'bubble-other',
+                      message.deleted && 'italic opacity-60',
+                      highlightedId === message.id && 'ring-2 ring-fg/40 shadow-lift',
+                    )}
+                  >
+                    {message.replyTo && !message.deleted && (
+                      <div className={cn('mb-1.5 rounded-lg border-l-2 px-2 py-1 text-[10.5px]', mine ? 'border-white/40 bg-white/10 text-white/70 dark:border-black/20 dark:bg-black/[.06] dark:text-black/60' : 'border-fg/25 bg-fg/[.04] text-fg/50')}>
+                        <p className="font-medium">{message.replyTo.sender_name}</p>
+                        <p className="line-clamp-2">{message.replyTo.body ?? 'Archivo adjunto'}</p>
+                      </div>
+                    )}
+
+                    {message.deleted ? (
+                      <p>Mensaje eliminado</p>
+                    ) : (
+                      <>
+                        {sticker && (
+                          <img src={sticker.url} alt={sticker.name} className="h-28 w-28 object-contain" loading="lazy" />
+                        )}
+
+                        {message.oneTime && message.kind === 'image' && !mine ? (
+                          oneTimeUrl ? (
+                            <span className="relative block">
+                              <img src={oneTimeUrl} alt="Foto única" className="max-h-72 rounded-lg object-cover" />
+                              <span className="absolute right-1 top-1 flex items-center gap-1 rounded-full bg-black/55 px-2 py-0.5 text-[9px] text-white">
+                                <Eye size={10} /> Vista una vez
+                              </span>
+                            </span>
+                          ) : message.viewed ? (
+                            <span className="flex items-center gap-1.5 py-1 text-[11px] italic text-fg/40"><Eye size={12} /> Foto única visualizada</span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => void openOneTime(message)}
+                              className="flex items-center gap-2 rounded-lg border border-dashed border-line px-3 py-3 text-[11px] text-fg/55 transition-colors hover:bg-fg/[.05]"
+                            >
+                              <Lock size={14} /> Ver foto única
+                            </button>
+                          )
+                        ) : message.attachment && message.kind === 'image' && !sticker ? (
+                          <a href={`/api/files/${message.attachment.id}`} target="_blank" rel="noreferrer" className="block">
+                            <img src={`/api/files/${message.attachment.id}`} alt={message.attachment.name} className="max-h-72 rounded-lg object-cover" loading="lazy" />
+                          </a>
+                        ) : null}
+
+                        {message.attachment && (message.kind === 'audio' || message.attachment.mime.startsWith('audio/')) && (
+                          <AudioNote src={`/api/files/${message.attachment.id}`} name={message.attachment.name} />
+                        )}
+                        {message.attachment && message.kind === 'file' && (
+                          <a href={`/api/files/${message.attachment.id}`} target="_blank" rel="noreferrer" className={cn('flex items-center gap-2 rounded-lg px-2 py-1.5', mine ? 'bg-white/10 hover:bg-white/20 dark:bg-black/[.06] dark:hover:bg-black/[.1]' : 'bg-fg/[.04] hover:bg-fg/[.07]')}>
+                            <FileText size={16} className={cn('shrink-0', mine ? 'text-white/70 dark:text-black/60' : 'text-fg/60')} />
+                            <span className="min-w-0">
+                              <span className={cn('block truncate text-[12px]', mine ? 'text-white/90 dark:text-black/80' : 'text-fg/85')}>{message.attachment.name}</span>
+                              <span className={cn('block text-[10px]', mine ? 'text-white/50 dark:text-black/50' : 'text-fg/40')}>{formatBytes(message.attachment.size)}</span>
+                            </span>
+                          </a>
+                        )}
+
+                        {message.body && !sticker && (message.kind !== 'file' || message.body !== message.attachment?.name) && (
+                          <p className="whitespace-pre-wrap break-words">{message.body}</p>
+                        )}
+                      </>
+                    )}
+
+                    <div className={cn('mt-1 flex items-center gap-1.5 text-[9px]', mine ? 'justify-end text-white/50 dark:text-black/50' : 'text-fg/30')}>
+                      <span>{new Intl.DateTimeFormat('es-PE', { hour: '2-digit', minute: '2-digit' }).format(new Date(message.createdAt))}</span>
+                      {message.oneTime && <Lock size={10} aria-label="Visualización única" />}
+                      {message.editedAt && <span>editado</span>}
+                      {mine && !message.deleted && <CheckCheck size={11} className={isReadByPeer(message) ? 'text-white dark:text-black' : 'text-white/40 dark:text-black/40'} />}
+                    </div>
+                  </div>
+
+                  {message.reactions.length > 0 && (
+                    <div className={cn('mt-0.5 flex flex-wrap gap-1', mine ? 'justify-end' : 'justify-start')}>
+                      {message.reactions.map((reaction) => (
+                        <button key={reaction.emoji} onClick={() => react(message, reaction.emoji)} className="rounded-full border border-line/80 bg-white/70 px-1.5 py-0.5 text-[10px] text-fg/60 backdrop-blur-sm transition-colors hover:border-fg/25 dark:bg-white/[.06]">
+                          {reaction.emoji} {reaction.count}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {!message.deleted && (
+                    <div
+                      className={cn(
+                        'absolute -top-2 z-10 flex items-center gap-0.5 rounded-full border border-line/70 bg-white/85 px-1 py-0.5 opacity-0 shadow-lg backdrop-blur-xl transition-opacity group-hover:opacity-100 dark:bg-white/[.1]',
+                        toolbarFor === message.id && 'opacity-100',
+                        mine ? 'right-1' : 'left-1',
+                      )}
+                    >
+                      <button onClick={() => { setToolbarFor(null); setReactionFor(reactionFor === message.id ? null : message.id); }} className="rounded-full p-1 text-fg/45 hover:bg-fg/10 hover:text-fg" aria-label="Reaccionar" title="Reaccionar"><Smile size={11} /></button>
+                      <button onClick={() => { setReplyTo(message); setEditing(null); setToolbarFor(null); }} className="rounded-full p-1 text-fg/45 hover:bg-fg/10 hover:text-fg" aria-label="Responder" title="Responder"><MessageSquare size={11} /></button>
+                      <button onClick={() => void copyMessage(message)} className="rounded-full p-1 text-fg/45 hover:bg-fg/10 hover:text-fg" aria-label="Copiar" title="Copiar"><Copy size={11} /></button>
+                      <button onClick={() => { setForwardFor(message); setToolbarFor(null); }} className="rounded-full p-1 text-fg/45 hover:bg-fg/10 hover:text-fg" aria-label="Reenviar" title="Reenviar"><Forward size={11} /></button>
+                      {message.oneTime && message.kind === 'image' && !mine && !message.viewed && !oneTimeUrl && (
+                        <button onClick={() => void openOneTime(message)} className="rounded-full p-1 text-fg/45 hover:bg-fg/10 hover:text-fg" aria-label="Ver una vez" title="Ver una vez"><Eye size={11} /></button>
+                      )}
+                      {mine && <button onClick={() => { setEditing(message); setEditDraft(message.body ?? ''); setReplyTo(null); setToolbarFor(null); }} className="rounded-full p-1 text-fg/45 hover:bg-fg/10 hover:text-fg" aria-label="Editar" title="Editar"><FileText size={11} /></button>}
+                      {mine && <button onClick={() => { setToolbarFor(null); remove(message); }} className="rounded-full p-1 text-fg/45 hover:bg-fg/10 hover:text-fg" aria-label="Eliminar" title="Eliminar"><Trash2 size={11} /></button>}
+                    </div>
+                  )}
+
+                  {reactionFor === message.id && (
+                    <div className={cn('absolute bottom-full z-20 mb-1 flex flex-col gap-1', mine ? 'right-0' : 'left-0')}>
+                      <div className="flex gap-0.5 self-end rounded-full border border-line/70 bg-white/90 px-1.5 py-1 shadow-lift backdrop-blur-xl dark:bg-white/[.1]">
+                        {QUICK_REACTIONS.map((emoji) => (
+                          <button key={emoji} onClick={() => react(message, emoji)} className="rounded-full px-1 text-[14px] hover:scale-110" aria-label={`Reaccionar con ${emoji}`}>{emoji}</button>
+                        ))}
+                      </div>
+                      <EmojiPicker onPick={(emoji) => react(message, emoji)} />
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        <div ref={bottomRef} />
+      </div>
+
+      <div className="relative border-t border-line/70 p-2.5 sm:p-3">
+        {replyTo && (
+          <div className="mb-2 flex items-center gap-2 rounded-xl border-l-2 border-fg/25 bg-white/45 px-3 py-1.5 dark:bg-white/[.04]">
+            <div className="min-w-0 flex-1">
+              <p className="text-[10px] font-medium text-fg/60">Respondiendo a {replyTo.sender.name}</p>
+              <p className="truncate text-[11px] text-fg/35">{replyTo.body ?? 'Archivo adjunto'}</p>
+            </div>
+            <button onClick={() => setReplyTo(null)} className="p-1 text-fg/30 hover:text-fg/70" aria-label="Cancelar respuesta"><X size={13} /></button>
+          </div>
+        )}
+
+        {editing && (
+          <div className="mb-2 rounded-xl border border-dashed border-fg/25 bg-white/40 p-2 dark:bg-white/[.04]">
+            <p className="mb-1 text-[10px] uppercase tracking-[0.12em] text-fg/45">Editando mensaje</p>
+            <textarea value={editDraft} onChange={(event) => setEditDraft(event.target.value)} rows={2} className="input resize-none !py-1.5 !text-[12px]" />
+            <div className="mt-1.5 flex justify-end gap-2">
+              <button onClick={() => setEditing(null)} className="btn btn-ghost btn-sm">Cancelar</button>
+              <button onClick={saveEdit} className="btn btn-primary btn-sm">Guardar</button>
+            </div>
+          </div>
+        )}
+
+        {composerEmojiOpen && (
+          <div className="absolute bottom-full left-3 z-30 mb-2" onClick={(event) => event.stopPropagation()}>
+            <EmojiPicker onPick={insertEmoji} />
+          </div>
+        )}
+
+        {stickerOpen && (
+          <div className="absolute bottom-full left-3 z-30 mb-2 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-line/80 bg-white/95 shadow-lift backdrop-blur-xl dark:bg-white/[.1]" onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-line/70 px-3 py-2">
+              <p className="text-[11px] font-medium text-fg/70">Stickers</p>
+              <button
+                type="button"
+                onClick={() => stickerFileRef.current?.click()}
+                disabled={stickerUploading || !packsQuery.data?.packs.length}
+                className="btn btn-ghost btn-sm !px-2 !py-1 !text-[10px]"
+                title="Subir sticker al paquete activo"
+              >
+                {stickerUploading ? 'Subiendo…' : 'Subir sticker'}
+              </button>
+            </div>
+            <div className="flex gap-1 overflow-x-auto px-3 py-2">
+              {packsQuery.data?.packs.map((pack) => (
+                <button
+                  key={pack.id}
+                  type="button"
+                  onClick={() => setActivePackId(pack.id)}
+                  className={cn(
+                    'shrink-0 rounded-full border px-2 py-1 text-[10px] transition-colors',
+                    (activePackId ?? packsQuery.data?.packs[0]?.id) === pack.id
+                      ? 'border-fg/30 bg-fg text-paper'
+                      : 'border-line text-fg/55 hover:text-fg/85',
+                  )}
+                >
+                  {pack.name} <span className="opacity-50">{pack.sticker_count ?? 0}</span>
+                </button>
+              ))}
+              {!packsQuery.data?.packs.length && (
+                <p className="text-[10px] text-fg/40">Crea un paquete para guardar tus stickers.</p>
+              )}
+            </div>
+            <div className="grid max-h-44 grid-cols-5 gap-1 overflow-y-auto px-3 pb-2">
+              {visibleStickers.map((sticker) => (
+                <button
+                  key={sticker.id}
+                  type="button"
+                  onClick={() => void sendSticker(sticker)}
+                  title={sticker.name}
+                  className="flex h-14 items-center justify-center rounded-lg border border-line/70 bg-white/50 transition-colors hover:bg-fg/[.06] dark:bg-white/[.05]"
+                >
+                  <img src={sticker.url} alt={sticker.name} className="h-12 w-12 object-contain" />
+                </button>
+              ))}
+              {!visibleStickers.length && (
+                <p className="col-span-5 py-3 text-center text-[10px] text-fg/35">Este paquete aún no tiene stickers.</p>
+              )}
+            </div>
+            <div className="flex gap-1.5 border-t border-line/70 px-3 py-2">
+              <input
+                value={newPackName}
+                onChange={(event) => setNewPackName(event.target.value)}
+                onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void createPack(); } }}
+                placeholder="Nombre del paquete"
+                className="input !py-1.5 !text-[11px] flex-1"
+              />
+              <button type="button" onClick={() => void createPack()} className="btn btn-sm !py-1.5 !text-[11px]">Crear</button>
+            </div>
+          </div>
+        )}
+
+        {recording ? (
+          <div className="flex items-center gap-3 rounded-2xl border border-dashed border-fg/30 bg-white/40 px-4 py-2.5 dark:bg-white/[.04]">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-fg" />
+            <span className="text-[12px] text-fg/70">
+              Grabando nota de voz · {formatClock(recordSeconds)}
+            </span>
+            <button
+              type="button"
+              onClick={cancelRecording}
+              className="btn btn-ghost btn-sm !px-2 !py-1 !text-[11px]"
+              title="Cancelar grabación"
+            >
+              <X size={12} /> Cancelar
+            </button>
+            <button onClick={toggleRecording} className="ml-auto flex items-center gap-1.5 rounded-full bg-fg px-3 py-1.5 text-[11px] font-medium text-paper"><Square size={11} /> Detener y enviar</button>
+          </div>
+        ) : (
+          <form onSubmit={(event) => { event.preventDefault(); void send(); }} className="glass flex items-end gap-1.5 rounded-[20px] p-1.5">
+            <input
+              ref={fileRef}
+              type="file"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = '';
+                if (!file) return;
+                void uploadAndSend(file, file.type.startsWith('image/') ? 'image' : 'file');
+              }}
+            />
+            <input
+              ref={oneTimeFileRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = '';
+                if (!file) return;
+                void uploadAndSendOneTime(file);
+              }}
+            />
+            <input
+              ref={stickerFileRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = '';
+                if (!file) return;
+                void uploadSticker(file);
+              }}
+            />
+            <div className="flex items-center">
+              <button type="button" onClick={() => { setStickerOpen(false); setComposerEmojiOpen((open) => !open); }} className="btn btn-ghost btn-sm !px-1.5" title="Emojis" aria-label="Emojis"><Smile size={17} /></button>
+              <button type="button" onClick={() => { setComposerEmojiOpen(false); setStickerOpen((open) => !open); }} className={cn('btn btn-ghost btn-sm !px-1.5', stickerOpen && 'bg-fg/[.08]')} title="Stickers" aria-label="Stickers"><ImageIcon size={17} /></button>
+              <button type="button" onClick={() => fileRef.current?.click()} disabled={uploading} className="btn btn-ghost btn-sm !px-1.5" title="Adjuntar archivo" aria-label="Adjuntar archivo">
+                <Paperclip size={17} className={uploading ? 'animate-pulse' : ''} />
+              </button>
+              <button type="button" onClick={() => oneTimeFileRef.current?.click()} disabled={uploading} className="btn btn-ghost btn-sm !px-1.5" title="Foto única" aria-label="Foto única"><Camera size={17} /></button>
+              <button type="button" onClick={toggleRecording} className="btn btn-ghost btn-sm !px-1.5" title="Grabar nota de voz" aria-label="Grabar nota de voz"><Mic size={17} /></button>
+            </div>
+            <textarea
+              ref={textareaRef}
+              value={draft}
+              onChange={(event) => handleDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
+                  void send();
+                }
+              }}
+              rows={1}
+              placeholder="Escribe un mensaje…"
+              className="max-h-32 min-h-9 flex-1 resize-none bg-transparent px-1 py-2 text-[13px] text-fg/90 outline-none placeholder:text-fg/30"
+            />
+            <button type="submit" disabled={!draft.trim()} className="btn btn-primary !rounded-xl !px-3 !py-2" aria-label="Enviar"><Send size={15} /></button>
+          </form>
+        )}
+      </div>
+    </div>
+  ) : (
+    <div className="flex h-full flex-col items-center justify-center p-8 text-center">
+      <div className="flex h-16 w-16 items-center justify-center rounded-3xl bg-fg text-paper shadow-[0_18px_38px_-24px_rgba(0,0,0,.9)]">
+        <MessageSquare size={26} />
+      </div>
+      <h2 className="mt-5 font-display text-[26px] text-fg/90">Tus mensajes</h2>
+      <p className="mt-1.5 max-w-sm text-[12.5px] leading-relaxed text-fg/40">
+        Conversaciones privadas en tiempo real con otros estudiantes. Elige una conversación o inicia una nueva.
+      </p>
+      <button onClick={() => setNewChatOpen(true)} className="btn btn-primary btn-sm mt-5"><Plus size={13} /> Nueva conversación</button>
+    </div>
+  );
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <p className="text-[10.5px] font-semibold uppercase tracking-[0.18em] text-fg/30">Mensajería privada</p>
+          <h1 className="mt-1 font-display text-[30px] leading-none text-fg/95">Conversaciones</h1>
+        </div>
+        <div className="flex items-center gap-2 text-[10px] text-fg/25">
+          <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-fg/60" /> Tiempo real</span>
+          <span className="hidden sm:inline">·</span>
+          <span className="hidden sm:inline">Llamadas WebRTC P2P</span>
+        </div>
+      </div>
+
+      <div className="card grid h-[calc(100dvh-190px)] min-h-[520px] grid-cols-1 overflow-hidden lg:grid-cols-[320px_1fr]">
+        <aside className={cn('min-h-0 border-r border-line', id ? 'hidden lg:block' : 'block')}>{list}</aside>
+        <section className={cn('min-h-0', id ? 'block' : 'hidden lg:block')}>{chat}</section>
+      </div>
+
+      <p className="px-1 text-[10px] leading-relaxed text-fg/20">
+        Los mensajes se almacenan en el servidor y se entregan por Socket.IO. Las llamadas son P2P mediante WebRTC; sin servidor TURN configurado, algunas redes restrictivas pueden impedir la conexión.
+      </p>
+
+      <CallLayer call={call} />
+
+      <Modal open={infoOpen} onClose={() => setInfoOpen(false)} title="Detalles de la conversación">
+        {conversation && (
+          <div className="space-y-4">
+            <div className="flex items-center gap-3">
+              <Avatar name={conversation.title} url={conversation.avatarUrl} size={48} />
+              <div>
+                <p className="font-display text-lg text-fg/90">{conversation.title}</p>
+                <p className="text-[11px] text-fg/35">{conversation.type === 'direct' ? 'Conversación directa' : `Grupo · ${conversation.members.length} integrantes`}</p>
+              </div>
+            </div>
+
+            <div>
+              <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-fg/30">Integrantes</p>
+              <div className="space-y-1.5">
+                {conversation.members.map((member) => (
+                  <div key={member.id} className="flex items-center gap-2.5 rounded-xl border border-line px-2.5 py-2">
+                    <Avatar name={member.name} url={member.avatarUrl} size={28} />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[12px] text-fg/80">{member.name}{member.id === user?.id ? ' (tú)' : ''}</p>
+                      <p className="truncate text-[10px] text-fg/30">{member.university ?? 'Estudiante de Derecho'}</p>
+                    </div>
+                    {online.has(member.id) && <span className="text-[9px] text-ok/70">En línea</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {otherMember && (
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={() => { setInfoOpen(false); call.start(otherMember, 'audio', conversation.id); }} className="btn btn-sm"><Phone size={13} /> Llamar</button>
+                <button onClick={() => { setInfoOpen(false); call.start(otherMember, 'video', conversation.id); }} className="btn btn-sm"><Video size={13} /> Video</button>
+              </div>
+            )}
+
+            <Link to={`/perfil/${otherMember?.id ?? ''}`} onClick={() => setInfoOpen(false)} className={cn('btn btn-sm w-full', !otherMember && 'hidden')}>
+              <Users size={13} /> Ver perfil
+            </Link>
+          </div>
+        )}
+      </Modal>
+
+      <Modal open={Boolean(forwardFor)} onClose={() => setForwardFor(null)} title="Reenviar mensaje">
+        <p className="mb-3 line-clamp-2 rounded-xl bg-fg/[.04] px-3 py-2 text-[12px] text-fg/55 dark:bg-white/[.05]">
+          {forwardFor?.body ?? (forwardFor?.attachment ? `📎 ${forwardFor.attachment.name}` : 'Mensaje adjunto')}
+        </p>
+        <div className="max-h-80 space-y-1 overflow-y-auto">
+          {(conversationsQuery.data?.conversations ?? [])
+            .filter((item) => item.id !== id)
+            .map((item) => (
+              <button
+                key={item.id}
+                onClick={() => void sendForward(item.id)}
+                className="flex w-full items-center gap-2.5 rounded-xl border border-line px-2.5 py-2 text-left transition-colors hover:bg-fg/[.04]"
+              >
+                <Avatar name={item.title} url={item.avatarUrl} size={30} />
+                <span className="min-w-0 flex-1 truncate text-[12.5px] text-fg/80">{item.title}</span>
+                <Send size={13} className="text-fg/25" />
+              </button>
+            ))}
+          {(conversationsQuery.data?.conversations ?? []).filter((item) => item.id !== id).length === 0 && (
+            <p className="py-4 text-center text-[11px] text-fg/40">No hay otras conversaciones.</p>
+          )}
+        </div>
+      </Modal>
+
+      <Modal open={newChatOpen} onClose={() => setNewChatOpen(false)} title="Nueva conversación">
+        <div className="space-y-3">
+          <div className="relative">
+            <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg/25" />
+            <input value={studentSearch} onChange={(event) => setStudentSearch(event.target.value)} placeholder="Busca por nombre, universidad o correo…" className="input !py-2 !text-[12px] pl-9" />
+          </div>
+          <div className="max-h-72 space-y-1 overflow-y-auto">
+            {studentsQuery.isLoading && [0, 1, 2].map((i) => <Skeleton key={i} className="h-14 w-full" />)}
+            {studentsQuery.data?.users.map((student) => (
+              <button key={student.id} onClick={() => startChat(student.id)} className="flex w-full items-center gap-2.5 rounded-xl border border-line px-2.5 py-2 text-left hover:bg-fg/[.04]">
+                <Avatar name={student.name} url={student.avatarUrl} size={32} />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[12.5px] text-fg/80">{student.name}</span>
+                  <span className="block truncate text-[10px] text-fg/30">{[student.university, student.cycle].filter(Boolean).join(' · ') || 'Sin datos académicos'}</span>
+                </span>
+                <Send size={13} className="text-fg/25" />
+              </button>
+            ))}
+            {!studentsQuery.isLoading && (studentsQuery.data?.users.length ?? 0) === 0 && (
+              <EmptyState icon={<Users size={18} />} title="Sin estudiantes" description="No encontramos estudiantes con ese criterio." />
+            )}
+          </div>
+          <p className="text-[10px] leading-relaxed text-fg/25">Solo puedes iniciar conversaciones con estudiantes registrados. La otra persona recibirá una notificación real.</p>
+        </div>
+      </Modal>
+    </div>
+  );
+}

@@ -1,0 +1,57 @@
+services:
+  etonlex:
+    build: .
+    image: eton-lex:production
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATA_DIR: /data
+      DATABASE_PATH: /data/eton-lex.db
+      BACKUP_DIR: /data/backups
+    volumes:
+      - eton-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/system/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    env_file: .env.production
+    ports:
+      - "80:80"
+      - "80:80/udp"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      etonlex:
+        condition: service_healthy
+
+  backup:
+    build: .
+    image: eton-lex:production
+    restart: "no"
+    command: ["npm", "run", "backup"]
+    env_file: .env.production
+    environment:
+      BACKUP_DIR: /backups
+    volumes:
+      - eton-data:/data
+      - ./backups:/backups
+    depends_on:
+      etonlex:
+        condition: service_healthy
+
+volumes:
+  eton-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,171 @@
+import type { Server, Socket } from 'socket.io';
+import jwt from 'jsonwebtoken';
+import { config } from './config.js';
+import { db, uuid } from './db/index.js';
+import { setIo } from './lib/notify.js';
+
+type AuthedSocket = Socket & { userId?: string; userName?: string };
+
+const online = new Map<string, number>();
+
+function friendIds(userId: string): string[] {
+  return db.prepare(`
+    SELECT CASE WHEN requester_id = ? THEN addressee_id ELSE requester_id END AS id
+    FROM friendships WHERE status = 'accepted' AND (requester_id = ? OR addressee_id = ?)
+  `).all(userId, userId, userId).map((r: any) => r.id);
+}
+
+function isMember(conversationId: string, userId: string): boolean {
+  return Boolean(db.prepare('SELECT 1 FROM conversation_members WHERE conversation_id = ? AND user_id = ?').get(conversationId, userId));
+}
+
+export function initRealtime(io: Server) {
+  setIo(io);
+
+  io.use((socket: AuthedSocket, next) => {
+    const token = (socket.handshake.auth?.token as string | undefined) ?? socket.handshake.headers.authorization?.replace('Bearer ', '');
+    if (!token) return next(new Error('No autorizado'));
+    try {
+      const payload = jwt.verify(token, config.jwtSecret) as { sub: string; role: string };
+      const user = db.prepare('SELECT id, name FROM users WHERE id = ?').get(payload.sub) as { id: string; name: string } | undefined;
+      if (!user) return next(new Error('Usuario no encontrado'));
+      socket.userId = user.id;
+      socket.userName = user.name;
+      next();
+    } catch {
+      next(new Error('Token inválido'));
+    }
+  });
+
+  io.on('connection', (socket: AuthedSocket) => {
+    const userId = socket.userId!;
+    socket.join(`user:${userId}`);
+
+    const conversations = db.prepare('SELECT conversation_id FROM conversation_members WHERE user_id = ?').all(userId);
+    for (const c of conversations as Array<{ conversation_id: string }>) socket.join(`conv:${c.conversation_id}`);
+
+    const roomRows = db.prepare('SELECT room_id FROM room_members WHERE user_id = ? AND left_at IS NULL').all(userId);
+    for (const r of roomRows as Array<{ room_id: string }>) socket.join(`room:${r.room_id}`);
+
+    const count = (online.get(userId) ?? 0) + 1;
+    online.set(userId, count);
+    if (count === 1) {
+      for (const fid of friendIds(userId)) io.to(`user:${fid}`).emit('presence:update', { userId, online: true });
+    }
+    socket.emit('presence:list', { online: [...online.keys()] });
+
+    socket.on('presence:sync', () => {
+      socket.emit('presence:list', { online: [...online.keys()] });
+    });
+
+    socket.on('conversation:join', (conversationId: string) => {
+      if (isMember(conversationId, userId)) socket.join(`conv:${conversationId}`);
+    });
+
+    socket.on('typing', (payload: { conversationId: string; typing: boolean }) => {
+      if (!isMember(payload.conversationId, userId)) return;
+      socket.to(`conv:${payload.conversationId}`).emit('typing', {
+        conversationId: payload.conversationId,
+        userId,
+        name: socket.userName,
+        typing: Boolean(payload.typing),
+      });
+    });
+
+    // ── Señalización WebRTC (llamadas reales P2P) ──────────────
+    socket.on('call:invite', (payload: { callId: string; to: string; conversationId: string; kind: 'audio' | 'video' }) => {
+      if (!isMember(payload.conversationId, userId)) return;
+      if (!isMember(payload.conversationId, payload.to)) return;
+      db.prepare(`
+        INSERT INTO call_history (id, conversation_id, caller_id, callee_id, kind, status)
+        VALUES (?, ?, ?, ?, ?, 'missed')
+      `).run(payload.callId, payload.conversationId, userId, payload.to, payload.kind);
+      io.to(`user:${payload.to}`).emit('call:incoming', {
+        callId: payload.callId,
+        from: { id: userId, name: socket.userName },
+        conversationId: payload.conversationId,
+        kind: payload.kind,
+      });
+    });
+
+    socket.on('call:accept', (payload: { callId: string; to: string }) => {
+      const call = db.prepare('SELECT * FROM call_history WHERE id = ?').get(payload.callId) as any;
+      if (!call || call.callee_id !== userId) return;
+      io.to(`user:${call.caller_id}`).emit('call:accepted', { callId: call.id, by: userId });
+    });
+
+    socket.on('call:signal', (payload: { to: string; callId: string; signal: unknown }) => {
+      const call = db.prepare('SELECT * FROM call_history WHERE id = ?').get(payload.callId) as any;
+      if (!call || (call.caller_id !== userId && call.callee_id !== userId)) return;
+      if (payload.to !== call.caller_id && payload.to !== call.callee_id) return;
+      io.to(`user:${payload.to}`).emit('call:signal', { from: userId, callId: payload.callId, signal: payload.signal });
+    });
+
+    socket.on('call:decline', (payload: { callId: string; to: string }) => {
+      const call = db.prepare('SELECT * FROM call_history WHERE id = ?').get(payload.callId) as any;
+      if (!call || call.callee_id !== userId) return;
+      db.prepare("UPDATE call_history SET status = 'declined', ended_at = datetime('now') WHERE id = ?").run(call.id);
+      io.to(`user:${call.caller_id}`).emit('call:declined', { callId: call.id });
+    });
+
+    socket.on('call:end', (payload: { callId: string; to: string; durationS?: number }) => {
+      const call = db.prepare('SELECT * FROM call_history WHERE id = ?').get(payload.callId) as any;
+      if (!call || (call.caller_id !== userId && call.callee_id !== userId)) return;
+      const duration = Math.max(0, Number(payload.durationS ?? 0));
+      db.prepare("UPDATE call_history SET status = 'completed', ended_at = datetime('now'), duration_s = ? WHERE id = ? AND status != 'declined'")
+        .run(duration, call.id);
+      io.to(`user:${payload.to}`).emit('call:ended', { callId: call.id });
+    });
+
+    // ── Salas: pertenencia, señalización y colaboración ──────────
+    const isRoomMember = (roomId: string) => Boolean(db.prepare(
+      'SELECT 1 FROM room_members WHERE room_id = ? AND user_id = ? AND left_at IS NULL',
+    ).get(roomId, userId));
+
+    socket.on('room:join', (payload: { roomId: string }) => {
+      if (!payload?.roomId || !isRoomMember(payload.roomId)) return;
+      socket.join(`room:${payload.roomId}`);
+      socket.emit('room:joined', { roomId: payload.roomId });
+    });
+
+    socket.on('room:signal', (payload: { roomId: string; to?: string; signal: unknown }) => {
+      if (!payload?.roomId || !isRoomMember(payload.roomId)) return;
+      if (payload.to) {
+        if (!isRoomMember(payload.roomId) || payload.to === userId) return;
+        const targetMember = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND user_id = ? AND left_at IS NULL')
+          .get(payload.roomId, payload.to);
+        if (!targetMember) return;
+        io.to(`user:${payload.to}`).emit('room:signal', { from: userId, roomId: payload.roomId, signal: payload.signal });
+      } else {
+        socket.to(`room:${payload.roomId}`).emit('room:signal', { from: userId, roomId: payload.roomId, signal: payload.signal });
+      }
+    });
+
+    socket.on('room:reaction', (payload: { roomId: string; emoji: string }) => {
+      if (!payload?.roomId || !isRoomMember(payload.roomId)) return;
+      io.to(`room:${payload.roomId}`).emit('room:reaction', { roomId: payload.roomId, userId, emoji: String(payload.emoji).slice(0, 8) });
+    });
+
+    socket.on('room:hand', (payload: { roomId: string; raised: boolean }) => {
+      if (!payload?.roomId || !isRoomMember(payload.roomId)) return;
+      db.prepare('UPDATE room_members SET hand_raised = ? WHERE room_id = ? AND user_id = ?')
+        .run(payload.raised ? 1 : 0, payload.roomId, userId);
+      io.to(`room:${payload.roomId}`).emit('room:hand', { roomId: payload.roomId, userId, raised: Boolean(payload.raised) });
+    });
+
+    socket.on('whiteboard:draft', (payload: { roomId: string; pageId: string; element: unknown }) => {
+      if (!payload?.roomId || !isRoomMember(payload.roomId)) return;
+      socket.to(`room:${payload.roomId}`).emit('whiteboard:draft', payload);
+    });
+
+    socket.on('disconnect', () => {
+      const next = (online.get(userId) ?? 1) - 1;
+      if (next <= 0) {
+        online.delete(userId);
+        for (const fid of friendIds(userId)) io.to(`user:${fid}`).emit('presence:update', { userId, online: false });
+      } else {
+        online.set(userId, next);
+      }
+    });
+  });
+}

@@ -1,0 +1,38 @@
+import type { Server } from 'socket.io';
+import { db, uuid } from '../db/index.js';
+
+let io: Server | null = null;
+
+export function setIo(server: Server) {
+  io = server;
+}
+
+export function emitToUser(userId: string, event: string, payload: unknown) {
+  io?.to(`user:${userId}`).emit(event, payload);
+}
+
+export function emitToConversation(conversationId: string, event: string, payload: unknown) {
+  io?.to(`conv:${conversationId}`).emit(event, payload);
+}
+
+export function emitToRoom(roomId: string, event: string, payload: unknown) {
+  io?.to(`room:${roomId}`).emit(event, payload);
+}
+
+export function notify(
+  userId: string,
+  type: string,
+  title: string,
+  body?: string | null,
+  link?: string | null,
+  priority: 'normal' | 'high' = 'normal',
+) {
+  const id = uuid();
+  db.prepare(`
+    INSERT INTO notifications (id, user_id, type, title, body, link, priority)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, userId, type, title, body ?? null, link ?? null, priority);
+  const row = db.prepare('SELECT * FROM notifications WHERE id = ?').get(id);
+  emitToUser(userId, 'notification:new', row);
+  return row;
+}

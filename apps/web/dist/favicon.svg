@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" />
+      <stop offset="1" stop-color="#EFEFF2" />
+    </linearGradient>
+    <radialGradient id="glass" cx="0.28" cy="0.14" r="0.95">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.95" />
+      <stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0.18" />
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" />
+      <stop offset="0.45" stop-color="#D6D9DE" />
+      <stop offset="1" stop-color="#BEC2C8" />
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#bg)" />
+  <rect width="512" height="512" rx="112" fill="url(#glass)" />
+  <rect x="3" y="3" width="506" height="506" rx="109" stroke="#D9DCE1" stroke-width="6" />
+  <path d="M150 12 H362" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.9" />
+
+  <g stroke="#0A0A0A" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M256 62 L404 160 H108 Z" stroke-width="26" />
+    <g stroke-width="22">
+      <path d="M152 190 V330" />
+      <path d="M204 190 V330" />
+      <path d="M256 190 V330" />
+      <path d="M308 190 V330" />
+      <path d="M360 190 V330" />
+    </g>
+    <path d="M112 340 H400" stroke-width="24" />
+    <path d="M256 372 C224 358, 172 354, 116 364 L116 440 C172 430, 224 434, 256 452 C288 434, 340 430, 396 440 L396 364 C340 354, 288 358, 256 372 Z" stroke-width="24" />
+    <path d="M256 372 V452" stroke-width="18" />
+  </g>
+</svg>

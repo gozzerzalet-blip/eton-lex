@@ -1,0 +1,59 @@
+{
+  "id": "/",
+  "name": "ETON LEX — El Derecho, siempre a tu alcance",
+  "short_name": "ETON LEX",
+  "description": "Ecosistema jurídico inteligente para estudiantes de Derecho del Perú. Biblioteca normativa, ETON AI, noticias legislativas, comunidad y mensajería.",
+  "lang": "es-PE",
+  "dir": "ltr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#F1F1F3",
+  "theme_color": "#F1F1F3",
+  "categories": ["education", "productivity", "reference"],
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Biblioteca jurídica",
+      "short_name": "Biblioteca",
+      "description": "Normas, artículos y búsqueda en el corpus jurídico",
+      "url": "/biblioteca",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "ETON AI",
+      "short_name": "ETON AI",
+      "description": "Consultas asistidas sobre el corpus jurídico",
+      "url": "/ai",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Mensajes",
+      "short_name": "Mensajes",
+      "description": "Conversaciones y llamadas",
+      "url": "/mensajes",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
+  ]
+}
