@@ -16,6 +16,13 @@ documentsRouter.get('/files/avatar/:name', asyncHandler(async (req, res) => {
         throw notFound('Imagen no encontrada.');
     res.sendFile(file);
 }));
+documentsRouter.get('/files/cover/:name', asyncHandler(async (req, res) => {
+    const name = path.basename(req.params.name);
+    const file = path.join(config.paths.uploads, 'covers', name);
+    if (!fs.existsSync(file))
+        throw notFound('Imagen no encontrada.');
+    res.sendFile(file);
+}));
 documentsRouter.get('/files/:id', requireAuth, asyncHandler(async (req, res) => {
     const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
     if (!doc)
@@ -110,5 +117,16 @@ documentsRouter.post('/users/me/avatar', requireAuth, uploader('avatars').single
     const url = `/api/files/avatar/${req.file.filename}`;
     db.prepare("UPDATE users SET avatar_url = ?, updated_at = datetime('now') WHERE id = ?").run(url, req.user.id);
     res.json({ avatarUrl: url });
+}));
+documentsRouter.post('/users/me/cover', requireAuth, uploader('covers').single('cover'), asyncHandler(async (req, res) => {
+    if (!req.file)
+        throw notFound('No se recibió imagen.');
+    const previous = db.prepare('SELECT cover_url FROM users WHERE id = ?').get(req.user.id);
+    if (previous.cover_url?.startsWith('/api/files/cover/')) {
+        safeUnlink(path.join(config.paths.uploads, 'covers', path.basename(previous.cover_url)));
+    }
+    const url = `/api/files/cover/${req.file.filename}`;
+    db.prepare("UPDATE users SET cover_url = ?, updated_at = datetime('now') WHERE id = ?").run(url, req.user.id);
+    res.json({ coverUrl: url });
 }));
 //# sourceMappingURL=documents.routes.js.map

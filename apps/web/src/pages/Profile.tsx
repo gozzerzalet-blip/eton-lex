@@ -128,9 +128,11 @@ export default function Profile() {
   const isOwn = !id || id === user?.id;
 
   const fileRef = useRef<HTMLInputElement>(null);
+  const coverRef = useRef<HTMLInputElement>(null);
   const docRef = useRef<HTMLInputElement>(null);
   const [editing, setEditing] = useState(false);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [uploadingCover, setUploadingCover] = useState(false);
   const [uploadingDocs, setUploadingDocs] = useState(false);
   const [form, setForm] = useState<ProfileForm>(() => makeForm(user));
 
@@ -301,6 +303,23 @@ export default function Profile() {
     }
   };
 
+  const uploadCover = async (file: File) => {
+    setUploadingCover(true);
+    try {
+      const body = new FormData();
+      body.append('cover', file);
+      const response = await api<{ coverUrl: string }>('/users/me/cover', { method: 'POST', body });
+      if (user) setUser({ ...user, coverUrl: response.coverUrl });
+      setForm((value) => ({ ...value, coverUrl: response.coverUrl }));
+      toast.success('Portada actualizada.');
+      queryClient.invalidateQueries({ queryKey: ['profile', profileId] });
+    } catch (error) {
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo subir la portada.');
+    } finally {
+      setUploadingCover(false);
+    }
+  };
+
   const uploadDocuments = async (files: FileList) => {
     setUploadingDocs(true);
     try {
@@ -376,6 +395,28 @@ export default function Profile() {
               onError={(event) => { event.currentTarget.style.display = 'none'; }}
             />
           )}
+          {isOwn && (
+            <button
+              type="button"
+              onClick={() => coverRef.current?.click()}
+              disabled={uploadingCover}
+              className="absolute bottom-2 right-2 flex h-8 items-center gap-1.5 rounded-full bg-fg/85 px-2.5 text-[11px] font-medium text-paper shadow-lg backdrop-blur transition-opacity hover:opacity-85"
+              aria-label="Cambiar portada"
+            >
+              <Camera size={14} className={uploadingCover ? 'animate-pulse' : ''} /> Portada
+            </button>
+          )}
+          <input
+            ref={coverRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = '';
+              if (file) void uploadCover(file);
+            }}
+          />
         </div>
         <div className="relative px-5 pb-5 sm:px-7">
           <div className="-mt-12 flex flex-wrap items-end gap-4">
@@ -528,6 +569,7 @@ export default function Profile() {
             <div>
               <label className="label">Imagen de portada (URL)</label>
               <input value={form.coverUrl} onChange={(event) => setForm((value) => ({ ...value, coverUrl: event.target.value }))} className="input" placeholder="https://ejemplo.com/portada.jpg" maxLength={300} />
+              <p className="mt-1 text-[10px] text-fg/25">También puedes subirla con el botón «Portada» en la parte superior de tu perfil.</p>
             </div>
             <div className="sm:col-span-2">
               <label className="label">Sobre mí</label>

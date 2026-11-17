@@ -54,6 +54,22 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
+-- Códigos de un solo uso para recuperar contraseña. Nunca se guarda el código
+-- en texto plano: solo su hash. La sesión se revoca al completar el cambio.
+CREATE TABLE IF NOT EXISTS password_resets (
+  id           TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  email        TEXT NOT NULL,
+  code_hash    TEXT NOT NULL,
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  expires_at   TEXT NOT NULL,
+  consumed_at  TEXT,
+  requested_ip TEXT,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_password_resets_email ON password_resets(email, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets(user_id, consumed_at);
+
 CREATE TABLE IF NOT EXISTS legal_areas (
   slug        TEXT PRIMARY KEY,
   name        TEXT NOT NULL,

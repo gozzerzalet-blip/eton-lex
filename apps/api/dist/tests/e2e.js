@@ -206,6 +206,15 @@ async function main() {
     assert.equal(allowed.status, 200);
     assert.match(allowed.data.text, /ETON LEX/);
     ok('archivo compartido servido solo al destinatario');
+    // ── Portada del perfil ───────────────────────────────────────
+    const coverForm = new FormData();
+    coverForm.append('cover', new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], 'portada-e2e.png', { type: 'image/png' }));
+    const coverUpload = await request('/api/users/me/cover', { method: 'POST', token: tokenA, form: coverForm });
+    assert.equal(coverUpload.status, 200, JSON.stringify(coverUpload.data));
+    assert.match(coverUpload.data.coverUrl, /^\/api\/files\/cover\//);
+    const coverImage = await request(coverUpload.data.coverUrl, { raw: true });
+    assert.equal(coverImage.status, 200);
+    ok('portada del perfil subida y servida desde la página');
     // ── WebRTC: credenciales y señalización ─────────────────────
     const ice = await request('/api/system/ice', { token: tokenA });
     assert.equal(ice.status, 200);
@@ -235,6 +244,34 @@ async function main() {
     const admin = await request('/api/admin/overview', { token: tokenA });
     assert.equal(admin.status, 403);
     ok('administración protegida por rol');
+    // ── Recuperación de contraseña por código ───────────────────
+    const capabilities = await request('/api/system/capabilities');
+    assert.equal(capabilities.status, 200);
+    const emailReady = capabilities.data.email?.configured === true;
+    const recoveryEmail = `e2e.andrea.${stamp}@etonlex.test`;
+    if (emailReady) {
+        const unknown = await request('/api/auth/forgot-password', {
+            method: 'POST',
+            body: { email: `no-registrado.${stamp}@etonlex.test` },
+        });
+        assert.equal(unknown.status, 200);
+        assert.match(unknown.data.message, /Si el correo está registrado/);
+        const invalidCode = await request('/api/auth/reset-password', {
+            method: 'POST',
+            body: { email: recoveryEmail, code: '000000', password: 'IntentoFallido123!' },
+        });
+        assert.equal(invalidCode.status, 400);
+        assert.ok(!JSON.stringify(invalidCode.data).includes(recoveryEmail));
+        ok('recuperación activa: no revela si el correo existe ni acepta códigos inventados');
+    }
+    else {
+        const unavailable = await request('/api/auth/forgot-password', {
+            method: 'POST',
+            body: { email: recoveryEmail },
+        });
+        assert.equal(unavailable.status, 503);
+        ok('recuperación honestamente suspendida hasta configurar SMTP');
+    }
     // ── Cierre ──────────────────────────────────────────────────
     socketA.disconnect();
     socketB.disconnect();

@@ -26,7 +26,13 @@ systemRouter.get('/capabilities', (_req, res) => {
       feeds: config.news.feeds.length,
       newsApi: Boolean(config.news.newsApiKey),
     },
-    email: { configured: config.smtp.configured, note: config.smtp.configured ? null : 'Sin SMTP: verificación de correo y recuperación de contraseña pendientes.' },
+    email: {
+      configured: config.smtp.configured,
+      note: config.smtp.configured
+        ? 'Recuperación de contraseña por código disponible para cualquier cuenta registrada.'
+        : 'Sin SMTP: la recuperación de contraseña por código no está disponible.',
+      passwordReset: config.smtp.configured,
+    },
     webrtc: {
       stun: config.webrtc.stun,
       turn: Boolean(config.webrtc.turnUrl),

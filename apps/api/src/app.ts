@@ -76,6 +76,22 @@ export function createApp() {
     message: { error: { code: 'RATE_LIMIT', message: 'Demasiados registros desde esta red. Intenta más tarde.' } },
   }));
 
+  app.use('/api/auth/forgot-password', rateLimit({
+    windowMs: 60 * 60 * 1000,
+    limit: 5,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: { code: 'RATE_LIMIT', message: 'Demasiadas solicitudes de recuperación. Espera una hora.' } },
+  }));
+
+  app.use('/api/auth/reset-password', rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: { code: 'RATE_LIMIT', message: 'Demasiados intentos con el código. Espera 15 minutos.' } },
+  }));
+
   app.use('/api/ai', rateLimit({
     windowMs: 60 * 1000,
     limit: 40,

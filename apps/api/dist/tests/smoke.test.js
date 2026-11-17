@@ -42,6 +42,9 @@ test('GET /api/system/capabilities informa la configuración real', async () => 
     assert.equal(typeof body.ai.configured, 'boolean');
     assert.equal(typeof body.ai.provider, 'string');
     assert.equal(typeof body.news.configured, 'boolean');
+    assert.equal(typeof body.email.configured, 'boolean');
+    assert.equal(typeof body.email.passwordReset, 'boolean');
+    assert.equal(body.email.passwordReset, body.email.configured);
     assert.equal(typeof body.webrtc.turn, 'boolean');
 });
 test('GET /api/library devuelve un catálogo paginado', async () => {

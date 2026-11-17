@@ -45,10 +45,18 @@ test('GET /api/system/health responde con base de datos operativa', async () => 
 test('GET /api/system/capabilities informa la configuración real', async () => {
   const response = await get('/api/system/capabilities');
   assert.equal(response.status, 200);
-  const body = await response.json() as { ai: { configured: boolean; provider: string }; news: { configured: boolean }; webrtc: { turn: boolean } };
+  const body = await response.json() as {
+    ai: { configured: boolean; provider: string };
+    news: { configured: boolean };
+    email: { configured: boolean; passwordReset: boolean };
+    webrtc: { turn: boolean };
+  };
   assert.equal(typeof body.ai.configured, 'boolean');
   assert.equal(typeof body.ai.provider, 'string');
   assert.equal(typeof body.news.configured, 'boolean');
+  assert.equal(typeof body.email.configured, 'boolean');
+  assert.equal(typeof body.email.passwordReset, 'boolean');
+  assert.equal(body.email.passwordReset, body.email.configured);
   assert.equal(typeof body.webrtc.turn, 'boolean');
 });
 

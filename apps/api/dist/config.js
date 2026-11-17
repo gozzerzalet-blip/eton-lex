@@ -100,10 +100,17 @@ export const config = {
     },
     smtp: {
         host: process.env.SMTP_HOST ?? '',
-        port: int(process.env.SMTP_PORT, 587),
+        port: int(process.env.SMTP_PORT, 465),
         user: process.env.SMTP_USER ?? '',
         pass: process.env.SMTP_PASS ?? '',
-        from: process.env.SMTP_FROM ?? 'ETON LEX <no-reply@etonlex.pe>',
+        // Gmail rechaza remitentes que no sean la cuenta autenticada. Si no se
+        // define SMTP_FROM, se usa el propio SMTP_USER como remitente visible.
+        get from() {
+            return process.env.SMTP_FROM ?? (process.env.SMTP_USER ? `ETON LEX <${process.env.SMTP_USER}>` : 'ETON LEX <no-reply@etonlex.pe>');
+        },
+        get secure() {
+            return this.port === 465;
+        },
         get configured() {
             return Boolean(this.host && this.user && this.pass);
         },

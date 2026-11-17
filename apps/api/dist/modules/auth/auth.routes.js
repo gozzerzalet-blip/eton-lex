@@ -2,12 +2,18 @@ import crypto from 'node:crypto';
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
+import { config } from '../../config.js';
 import { db, logAudit, tx, uuid } from '../../db/index.js';
 import { clearRefreshCookie, createRefreshToken, publicUser, requireAuth, revokeAllSessions, revokeSession, rotateRefreshToken, setRefreshCookie, signAccess, } from '../../lib/auth.js';
-import { asyncHandler, badRequest, conflict, unauthorized } from '../../lib/http.js';
+import { sendPasswordResetCode } from '../../lib/mailer.js';
+import { ApiError, asyncHandler, badRequest, conflict, unauthorized } from '../../lib/http.js';
 export const authRouter = Router();
 const emailSchema = z.string().trim().toLowerCase().email('Correo electrónico inválido.').max(160);
 const passwordSchema = z.string().min(8, 'La contraseña debe tener al menos 8 caracteres.').max(200);
+const RESET_TTL_MINUTES = 15;
+const RESET_MAX_ATTEMPTS = 5;
+const RESET_RESEND_SECONDS = 60;
+const RESET_MESSAGE = 'Si el correo está registrado, enviamos un código con las instrucciones.';
 const registerSchema = z.object({
     name: z.string().trim().min(2, 'Ingresa tu nombre.').max(80),
     email: emailSchema,
@@ -82,6 +88,82 @@ authRouter.post('/login', asyncHandler(async (req, res) => {
     db.prepare('UPDATE users SET last_seen_at = datetime(\'now\') WHERE id = ?').run(row.id);
     logAudit(row.id, 'auth.login', {}, req.ip);
     res.json({ accessToken: signAccess(user), user: publicUser(row.id, true) });
+}));
+authRouter.post('/forgot-password', asyncHandler(async (req, res) => {
+    const { email } = z.object({ email: emailSchema }).parse(req.body);
+    if (!config.smtp.configured) {
+        throw new ApiError(503, 'EMAIL_NOT_CONFIGURED', 'El correo de la plataforma todavía no está configurado. Inténtalo más tarde.');
+    }
+    const user = db.prepare('SELECT id, email FROM users WHERE email = ?').get(email);
+    if (user) {
+        db.prepare(`
+      DELETE FROM password_resets
+      WHERE email = ? AND (expires_at <= datetime('now') OR consumed_at IS NOT NULL)
+    `).run(email);
+        const recent = db.prepare(`
+      SELECT created_at FROM password_resets
+      WHERE email = ? AND consumed_at IS NULL
+      ORDER BY created_at DESC LIMIT 1
+    `).get(email);
+        const secondsSince = recent
+            ? (Date.now() - new Date(`${recent.created_at.replace(' ', 'T')}Z`).getTime()) / 1000
+            : Infinity;
+        if (secondsSince >= RESET_RESEND_SECONDS) {
+            const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+            const id = uuid();
+            db.prepare(`
+        INSERT INTO password_resets (id, user_id, email, code_hash, expires_at, requested_ip)
+        VALUES (?, ?, ?, ?, datetime('now', '+${RESET_TTL_MINUTES} minutes'), ?)
+      `).run(id, user.id, email, bcrypt.hashSync(code, 10), req.ip ?? null);
+            try {
+                await sendPasswordResetCode(email, code);
+            }
+            catch (err) {
+                db.prepare('DELETE FROM password_resets WHERE id = ?').run(id);
+                throw err;
+            }
+            db.prepare(`
+        UPDATE password_resets SET consumed_at = datetime('now')
+        WHERE email = ? AND id != ? AND consumed_at IS NULL
+      `).run(email, id);
+            logAudit(user.id, 'auth.forgot_password', {}, req.ip);
+        }
+    }
+    // Respuesta idéntica siempre: no revela si la cuenta existe.
+    res.json({ ok: true, message: RESET_MESSAGE });
+}));
+authRouter.post('/reset-password', asyncHandler(async (req, res) => {
+    const data = z.object({
+        email: emailSchema,
+        code: z.string().trim().regex(/^\d{6}$/, 'El código debe tener 6 dígitos.'),
+        password: passwordSchema,
+    }).parse(req.body);
+    const row = db.prepare(`
+    SELECT * FROM password_resets
+    WHERE email = ? AND consumed_at IS NULL AND expires_at > datetime('now')
+    ORDER BY created_at DESC LIMIT 1
+  `).get(data.email);
+    if (!row)
+        throw badRequest('El código expiró o no es válido. Solicita uno nuevo.');
+    if (!bcrypt.compareSync(data.code, row.code_hash)) {
+        const attempts = row.attempts + 1;
+        if (attempts >= RESET_MAX_ATTEMPTS) {
+            db.prepare("UPDATE password_resets SET consumed_at = datetime('now') WHERE id = ?").run(row.id);
+            throw badRequest('Demasiados intentos incorrectos. Solicita un código nuevo.');
+        }
+        db.prepare('UPDATE password_resets SET attempts = ? WHERE id = ?').run(attempts, row.id);
+        throw badRequest('El código no es correcto.');
+    }
+    tx(() => {
+        db.prepare("UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?")
+            .run(bcrypt.hashSync(data.password, 11), row.user_id);
+        db.prepare("UPDATE password_resets SET consumed_at = datetime('now') WHERE user_id = ? AND consumed_at IS NULL")
+            .run(row.user_id);
+    });
+    revokeAllSessions(row.user_id);
+    logAudit(row.user_id, 'auth.reset_password', {}, req.ip);
+    clearRefreshCookie(res);
+    res.json({ ok: true, message: 'Contraseña actualizada. Ahora puedes iniciar sesión.' });
 }));
 authRouter.post('/refresh', asyncHandler(async (req, res) => {
     const token = req.cookies?.eton_refresh;

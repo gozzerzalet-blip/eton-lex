@@ -21,7 +21,7 @@ const ALLOWED = new Map<string, string>([
   ['audio/wav', '.wav'],
 ]);
 
-export function storageFor(subdir: 'documents' | 'ai' | 'avatars' | 'voice') {
+export function storageFor(subdir: 'documents' | 'ai' | 'avatars' | 'covers' | 'voice') {
   const dir = path.join(config.paths.uploads, subdir);
   fs.mkdirSync(dir, { recursive: true });
   return multer.diskStorage({
@@ -33,7 +33,7 @@ export function storageFor(subdir: 'documents' | 'ai' | 'avatars' | 'voice') {
   });
 }
 
-export function uploader(subdir: 'documents' | 'ai' | 'avatars' | 'voice') {
+export function uploader(subdir: 'documents' | 'ai' | 'avatars' | 'covers' | 'voice') {
   return multer({
     storage: storageFor(subdir),
     limits: { fileSize: config.maxUploadMb * 1024 * 1024, files: 5 },

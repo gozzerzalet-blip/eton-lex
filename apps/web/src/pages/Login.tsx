@@ -1,25 +1,61 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ArrowRight, Eye, EyeOff, Lock, Mail, ShieldCheck, Sparkles } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Eye, EyeOff, Lock, Mail, ShieldCheck, Sparkles } from 'lucide-react';
 import { api, ApiClientError } from '../lib/api';
 import { useAuth } from '../lib/store';
 import { Logo } from '../components/Logo';
 import { Spinner } from '../components/ui';
 import type { User } from '../lib/types';
 
+type Mode = 'login' | 'forgot' | 'reset';
+
+const COPY: Record<Mode, { eyebrow: string; title: string; description: string }> = {
+  login: {
+    eyebrow: 'Acceso a la plataforma',
+    title: 'Bienvenido de vuelta',
+    description: 'Ingresa con tu cuenta académica para continuar.',
+  },
+  forgot: {
+    eyebrow: 'Recuperación de acceso',
+    title: 'Recupera tu cuenta',
+    description: 'Te enviaremos un código de 6 dígitos al correo con el que te registraste.',
+  },
+  reset: {
+    eyebrow: 'Verificación por correo',
+    title: 'Revisa tu correo',
+    description: 'Ingresa el código que recibiste y elige una nueva contraseña.',
+  },
+};
+
 export default function Login() {
+  const [mode, setMode] = useState<Mode>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [show, setShow] = useState(false);
+  const [recoveryEmail, setRecoveryEmail] = useState('');
+  const [code, setCode] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const { setSession } = useAuth();
   const navigate = useNavigate();
+
+  const goTo = (next: Mode) => {
+    setMode(next);
+    setError('');
+    setNotice('');
+  };
+
+  const message = (err: unknown, fallback: string) =>
+    err instanceof ApiClientError ? err.message : fallback;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setNotice('');
     setLoading(true);
     try {
       const data = await api<{ accessToken: string; user: User }>('/auth/login', {
@@ -29,11 +65,61 @@ export default function Login() {
       setSession(data.user, data.accessToken);
       navigate('/');
     } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : 'No se pudo iniciar sesión.');
+      setError(message(err, 'No se pudo iniciar sesión.'));
     } finally {
       setLoading(false);
     }
   };
+
+  const requestCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setNotice('');
+    setLoading(true);
+    try {
+      const data = await api<{ message: string }>('/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify({ email: recoveryEmail }),
+      });
+      setNotice(data.message ?? 'Si el correo está registrado, enviamos un código.');
+      setCode('');
+      setNewPassword('');
+      setConfirmPassword('');
+      goTo('reset');
+      setNotice(data.message ?? 'Si el correo está registrado, enviamos un código.');
+    } catch (err) {
+      setError(message(err, 'No se pudo enviar el código.'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    if (newPassword !== confirmPassword) {
+      setError('Las contraseñas nuevas no coinciden.');
+      return;
+    }
+    setLoading(true);
+    try {
+      const data = await api<{ message: string }>('/auth/reset-password', {
+        method: 'POST',
+        body: JSON.stringify({ email: recoveryEmail, code, password: newPassword }),
+      });
+      setMode('login');
+      setPassword('');
+      setEmail(recoveryEmail);
+      setNotice(`${data.message ?? 'Contraseña actualizada.'} Ingresa con tu nueva contraseña.`);
+      setError('');
+    } catch (err) {
+      setError(message(err, 'No se pudo actualizar la contraseña.'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const copy = COPY[mode];
 
   return (
     <div className="relative z-10 grid min-h-screen grid-cols-1 lg:grid-cols-[1.05fr_1fr]">
@@ -72,41 +158,134 @@ export default function Login() {
           <div className="mb-8 lg:hidden"><Logo /></div>
 
           <div className="card p-6 sm:p-8">
-            <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.24em] text-fg/30">Acceso a la plataforma</p>
-            <h2 className="font-display text-[30px] leading-tight text-fg/95">Bienvenido de vuelta</h2>
-            <p className="mt-2 text-[13px] text-fg/40">Ingresa con tu cuenta académica para continuar.</p>
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.24em] text-fg/30">{copy.eyebrow}</p>
+            <h2 className="font-display text-[30px] leading-tight text-fg/95">{copy.title}</h2>
+            <p className="mt-2 text-[13px] text-fg/40">{copy.description}</p>
 
-            <form onSubmit={submit} className="mt-7 space-y-4">
-              <div>
-                <label className="label" htmlFor="email">Correo electrónico</label>
-                <div className="relative">
-                  <Mail size={15} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-fg/30" />
-                  <input id="email" type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} className="input pl-10" placeholder="tu.correo@universidad.edu.pe" />
+            {notice && (
+              <p className="mt-5 rounded-xl border border-fg/15 bg-white/50 px-3 py-2.5 text-[12px] leading-relaxed text-fg/70 dark:bg-white/[.05]">
+                {notice}
+              </p>
+            )}
+            {error && <p className="mt-5 rounded-xl border border-dashed border-fg/25 bg-white/40 px-3 py-2.5 text-[12px] text-fg/70 dark:bg-white/[.04]">{error}</p>}
+
+            {mode === 'login' && (
+              <form onSubmit={submit} className="mt-7 space-y-4">
+                <div>
+                  <label className="label" htmlFor="email">Correo electrónico</label>
+                  <div className="relative">
+                    <Mail size={15} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-fg/30" />
+                    <input id="email" type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} className="input pl-10" placeholder="tu.correo@universidad.edu.pe" />
+                  </div>
                 </div>
-              </div>
 
-              <div>
-                <label className="label" htmlFor="password">Contraseña</label>
-                <div className="relative">
-                  <Lock size={15} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-fg/30" />
-                  <input id="password" type={show ? 'text' : 'password'} autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} className="input px-10" placeholder="••••••••" />
-                  <button type="button" onClick={() => setShow((v) => !v)} className="absolute right-3 top-1/2 -translate-y-1/2 text-fg/30 hover:text-fg/60" aria-label="Mostrar contraseña">
-                    {show ? <EyeOff size={15} /> : <Eye size={15} />}
+                <div>
+                  <label className="label" htmlFor="password">Contraseña</label>
+                  <div className="relative">
+                    <Lock size={15} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-fg/30" />
+                    <input id="password" type={show ? 'text' : 'password'} autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} className="input px-10" placeholder="••••••••" />
+                    <button type="button" onClick={() => setShow((v) => !v)} className="absolute right-3 top-1/2 -translate-y-1/2 text-fg/30 hover:text-fg/60" aria-label="Mostrar contraseña">
+                      {show ? <EyeOff size={15} /> : <Eye size={15} />}
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { setRecoveryEmail(email); goTo('forgot'); }}
+                    className="mt-2 text-[11.5px] font-medium text-fg/45 underline decoration-fg/20 underline-offset-4 transition-colors hover:text-fg/75"
+                  >
+                    ¿Olvidaste tu contraseña?
                   </button>
                 </div>
-              </div>
 
-              {error && <p className="rounded-xl border border-dashed border-fg/25 bg-white/40 px-3 py-2.5 text-[12px] text-fg/70 dark:bg-white/[.04]">{error}</p>}
+                <button type="submit" disabled={loading} className="btn btn-primary w-full">
+                  {loading ? <Spinner size={15} className="border-paper/30 border-t-paper" /> : <>Ingresar <ArrowRight size={15} /></>}
+                </button>
+              </form>
+            )}
 
-              <button type="submit" disabled={loading} className="btn btn-primary w-full">
-                {loading ? <Spinner size={15} className="border-paper/30 border-t-paper" /> : <>Ingresar <ArrowRight size={15} /></>}
-              </button>
-            </form>
+            {mode === 'forgot' && (
+              <form onSubmit={requestCode} className="mt-7 space-y-4">
+                <div>
+                  <label className="label" htmlFor="recovery-email">Correo de tu cuenta</label>
+                  <div className="relative">
+                    <Mail size={15} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-fg/30" />
+                    <input id="recovery-email" type="email" autoComplete="email" required value={recoveryEmail} onChange={(e) => setRecoveryEmail(e.target.value)} className="input pl-10" placeholder="tu.correo@gmail.com" />
+                  </div>
+                  <p className="mt-2 text-[11px] leading-relaxed text-fg/35">
+                    Puede ser cualquier correo con el que te hayas registrado, no solo Gmail.
+                  </p>
+                </div>
 
-            <p className="mt-6 text-center text-[12.5px] text-fg/35">
-              ¿Aún no tienes cuenta?{' '}
-              <Link to="/registro" className="text-fg underline decoration-fg/25 underline-offset-4 transition-colors hover:decoration-fg">Crear cuenta</Link>
-            </p>
+                <button type="submit" disabled={loading} className="btn btn-primary w-full">
+                  {loading ? <Spinner size={15} className="border-paper/30 border-t-paper" /> : <>Enviar código <ArrowRight size={15} /></>}
+                </button>
+                <button type="button" onClick={() => goTo('login')} className="flex w-full items-center justify-center gap-1.5 text-[12px] text-fg/40 transition-colors hover:text-fg/70">
+                  <ArrowLeft size={13} /> Volver a ingresar
+                </button>
+              </form>
+            )}
+
+            {mode === 'reset' && (
+              <form onSubmit={submitReset} className="mt-7 space-y-4">
+                <div>
+                  <label className="label" htmlFor="reset-email">Correo de tu cuenta</label>
+                  <div className="relative">
+                    <Mail size={15} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-fg/30" />
+                    <input id="reset-email" type="email" autoComplete="email" required value={recoveryEmail} onChange={(e) => setRecoveryEmail(e.target.value)} className="input pl-10" placeholder="tu.correo@gmail.com" />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="label" htmlFor="reset-code">Código de 6 dígitos</label>
+                  <input
+                    id="reset-code"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    pattern="[0-9]{6}"
+                    required
+                    value={code}
+                    onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    className="input text-center text-[17px] tracking-[0.4em]"
+                    placeholder="000000"
+                  />
+                </div>
+
+                <div>
+                  <label className="label" htmlFor="new-password">Nueva contraseña</label>
+                  <div className="relative">
+                    <Lock size={15} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-fg/30" />
+                    <input id="new-password" type={show ? 'text' : 'password'} autoComplete="new-password" required minLength={8} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="input px-10" placeholder="Mínimo 8 caracteres" />
+                    <button type="button" onClick={() => setShow((v) => !v)} className="absolute right-3 top-1/2 -translate-y-1/2 text-fg/30 hover:text-fg/60" aria-label="Mostrar contraseña">
+                      {show ? <EyeOff size={15} /> : <Eye size={15} />}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="label" htmlFor="confirm-password">Confirmar contraseña</label>
+                  <div className="relative">
+                    <Lock size={15} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-fg/30" />
+                    <input id="confirm-password" type="password" autoComplete="new-password" required minLength={8} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="input pl-10" placeholder="Repite la contraseña" />
+                  </div>
+                </div>
+
+                <button type="submit" disabled={loading} className="btn btn-primary w-full">
+                  {loading ? <Spinner size={15} className="border-paper/30 border-t-paper" /> : <>Actualizar contraseña <ArrowRight size={15} /></>}
+                </button>
+                <button type="button" onClick={() => goTo('login')} className="flex w-full items-center justify-center gap-1.5 text-[12px] text-fg/40 transition-colors hover:text-fg/70">
+                  <ArrowLeft size={13} /> Volver a ingresar
+                </button>
+              </form>
+            )}
+
+            {mode === 'login' && (
+              <p className="mt-6 text-center text-[12.5px] text-fg/35">
+                ¿Aún no tienes cuenta?{' '}
+                <Link to="/registro" className="text-fg underline decoration-fg/25 underline-offset-4 transition-colors hover:decoration-fg">Crear cuenta</Link>
+              </p>
+            )}
           </div>
 
           <p className="mt-5 text-center text-[11px] leading-relaxed text-fg/30">
