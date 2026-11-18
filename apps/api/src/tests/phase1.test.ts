@@ -59,6 +59,8 @@ test('/api/ai/status expone router/tools y el chat conserva su contrato SSE', ()
   const out = runProbe({
     AI_PROVIDER: 'none',
     AI_MODEL: '',
+    AI_FALLBACK_PROVIDER: 'none',
+    AI_FALLBACK_MODEL: '',
     AI_WEB_RESEARCH: 'false',
   }, 'ai-contract-probe.ts');
   assert.equal(out.ok, true);

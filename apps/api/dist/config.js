@@ -18,13 +18,40 @@ const int = (v, fallback) => {
 // Proveedores que funcionan sin clave de API: un servidor local (Ollama) o un
 // punto de acceso comunitario sin registro (Pollinations).
 const NO_KEY_PROVIDERS = new Set(['ollama', 'pollinations']);
+const cleanProvider = (value) => (value ?? '').trim().toLowerCase();
+/** Un proveedor solo está listo si tiene nombre, modelo y credencial cuando toca. */
+const providerReady = ({ provider, model, apiKey }) => provider !== '' && provider !== 'none' && Boolean(model)
+    && (NO_KEY_PROVIDERS.has(provider) || Boolean(apiKey));
+const primarySeed = {
+    provider: cleanProvider(process.env.AI_PROVIDER),
+    model: process.env.AI_MODEL ?? '',
+    baseUrl: process.env.AI_BASE_URL ?? '',
+    apiKey: process.env.AI_API_KEY ?? '',
+};
+const fallbackSeed = {
+    provider: cleanProvider(process.env.AI_FALLBACK_PROVIDER),
+    model: process.env.AI_FALLBACK_MODEL ?? '',
+    baseUrl: process.env.AI_FALLBACK_BASE_URL ?? '',
+    apiKey: process.env.AI_FALLBACK_API_KEY ?? process.env.AI_API_KEY ?? '',
+};
+/**
+ * En Suga se documentó `AI_PROVIDER=none` con un respaldo gratuito. Antes ese
+ * respaldo nunca se usaba en el chat: `providerInfo().configured` era falso y
+ * la conversación caía directo en «Modo biblioteca». Si no hay principal pero
+ * sí un respaldo listo, ese respaldo pasa a ser el proveedor principal.
+ */
+const useFallbackAsPrimary = primarySeed.provider === 'none' && providerReady(fallbackSeed);
+const activePrimary = useFallbackAsPrimary ? fallbackSeed : primarySeed;
+const activeFallback = useFallbackAsPrimary
+    ? { provider: '', model: '', baseUrl: '', apiKey: '' }
+    : fallbackSeed;
 /**
  * Un rol de modelo puede apuntar a un proveedor distinto del principal. Si no
  * se configura, el rol usa el modelo principal: nunca se anuncia un modelo que
  * no está realmente conectado.
  */
 const roleConfig = (prefix) => ({
-    provider: (process.env[`${prefix}_PROVIDER`] ?? '').toLowerCase(),
+    provider: cleanProvider(process.env[`${prefix}_PROVIDER`]),
     model: process.env[`${prefix}_MODEL`] ?? '',
     baseUrl: process.env[`${prefix}_BASE_URL`] ?? '',
     apiKey: process.env[`${prefix}_API_KEY`] ?? '',
@@ -74,21 +101,19 @@ export const config = {
         retentionDays: int(process.env.BACKUP_RETENTION_DAYS, 14),
     },
     ai: {
-        provider: (process.env.AI_PROVIDER ?? 'none').toLowerCase(),
-        apiKey: process.env.AI_API_KEY ?? '',
-        model: process.env.AI_MODEL ?? '',
-        baseUrl: process.env.AI_BASE_URL ?? '',
+        provider: activePrimary.provider,
+        apiKey: activePrimary.apiKey,
+        model: activePrimary.model,
+        baseUrl: activePrimary.baseUrl,
         embeddingModel: process.env.EMBEDDING_MODEL ?? '',
         // Proveedor de respaldo: si el principal falla antes de emitir texto
         // (límite de uso, caída o timeout), la respuesta continúa con este otro
-        // modelo en lugar de mostrar un error al usuario.
+        // modelo en lugar de mostrar un error al usuario. Cuando el respaldo se
+        // promueve a principal no se deja un segundo intento al mismo destino.
         fallback: {
-            provider: (process.env.AI_FALLBACK_PROVIDER ?? '').toLowerCase(),
-            model: process.env.AI_FALLBACK_MODEL ?? '',
-            baseUrl: process.env.AI_FALLBACK_BASE_URL ?? '',
-            apiKey: process.env.AI_FALLBACK_API_KEY ?? process.env.AI_API_KEY ?? '',
+            ...activeFallback,
             get configured() {
-                return this.provider !== '' && this.provider !== 'none' && Boolean(this.model) && (NO_KEY_PROVIDERS.has(this.provider) || Boolean(this.apiKey));
+                return providerReady(activeFallback);
             },
         },
         // Temperatura baja: el asistente jurídico debe ser estable y no inventar.
@@ -100,10 +125,10 @@ export const config = {
         historyMessages: int(process.env.AI_HISTORY, 12),
         // Un modelo local en CPU necesita contexto corto; uno en la nube puede
         // recibir más fuentes sin penalizar la velocidad.
-        contextChars: int(process.env.AI_CONTEXT_CHARS, (process.env.AI_PROVIDER ?? '').toLowerCase() === 'ollama' ? 12_000 : 20_000),
+        contextChars: int(process.env.AI_CONTEXT_CHARS, activePrimary.provider === 'ollama' ? 12_000 : 20_000),
         libraryBlocks: int(process.env.AI_LIBRARY_BLOCKS, 8),
         get configured() {
-            return this.provider !== 'none' && (NO_KEY_PROVIDERS.has(this.provider) || Boolean(this.apiKey));
+            return providerReady(activePrimary);
         },
         // Router por capacidad. Con solo opciones gratis, el valor por defecto es
         // el modelo principal; se pueden separar razonamiento y claridad con

@@ -13,7 +13,7 @@
     "db:seed": "tsx src/db/seed.ts",
     "ingest": "tsx src/scripts/ingest.ts",
     "ingest:legal": "tsx src/scripts/legal-ingest.ts",
-    "test": "tsx src/tests/smoke.test.ts && tsx src/tests/migration.test.ts && tsx src/tests/phase1.test.ts && tsx src/tests/phase2.test.ts && tsx src/tests/phase3.test.ts && tsx src/tests/phase5.test.ts",
+    "test": "tsx src/tests/smoke.test.ts && tsx src/tests/migration.test.ts && tsx src/tests/ai-config.test.ts && tsx src/tests/phase1.test.ts && tsx src/tests/phase2.test.ts && tsx src/tests/phase3.test.ts && tsx src/tests/phase5.test.ts",
     "e2e": "tsx src/tests/e2e.ts"
   },
   "dependencies": {

@@ -22,6 +22,8 @@ function runProbe(name: string): Record<string, any> {
     BACKUP_DIR: path.join(temp, 'backups'),
     EMBEDDING_MODEL: '',
     AI_PROVIDER: 'none',
+    AI_FALLBACK_PROVIDER: 'none',
+    AI_FALLBACK_MODEL: '',
   };
   const result = spawnSync(process.execPath, ['--import', 'tsx', path.join(here, name)], {
     cwd: repoRoot,

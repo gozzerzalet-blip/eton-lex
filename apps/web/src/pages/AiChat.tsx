@@ -345,7 +345,7 @@ export default function AiChat() {
               <p className="mt-1 text-[10px] text-fg/35">
                 {status?.configured
                   ? `${status.provider}${status.model ? ` · ${status.model}` : ''}${status.fallback?.active ? ' · respaldo local' : ''}`
-                  : 'Modo biblioteca · sin proveedor de IA'}
+                  : 'Modo guiado · sin proveedor de IA'}
               </p>
             </div>
           </div>
@@ -387,7 +387,7 @@ export default function AiChat() {
 
         {!status?.configured && (
           <div className="border-b border-line/70 bg-fg/[.03] px-4 py-2.5 text-[11.5px] text-fg/60">
-            <strong className="text-fg/80">Modo biblioteca.</strong> No hay IA conectada, pero puedes buscar y leer el texto literal de los artículos. Las respuestas no las genera un modelo: se extraen de la biblioteca. Para activar la IA, configura <code className="text-fg">AI_PROVIDER</code> y <code className="text-fg">AI_MODEL</code> en el servidor (y <code className="text-fg">AI_API_KEY</code> si el proveedor la exige).
+            <strong className="text-fg/80">Modo guiado.</strong> No hay IA conectada: las explicaciones se ordenan con la fuente disponible, sin transcribir el artículo completo; las consultas literales siguen mostrando el texto exacto. Para activar respuestas redactadas por un modelo, configura <code className="text-fg">AI_PROVIDER</code> y <code className="text-fg">AI_MODEL</code> (o un respaldo gratuito) en el servidor.
           </div>
         )}
 
@@ -468,7 +468,7 @@ export default function AiChat() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
               rows={1}
-              placeholder={status?.configured ? 'Escribe tu consulta jurídica o de otra materia…' : 'Busca un artículo en la biblioteca (modo sin IA)…'}
+              placeholder={status?.configured ? 'Escribe tu consulta jurídica o de otra materia…' : 'Pregunta o busca un artículo (modo guiado sin IA)…'}
               className="max-h-40 min-h-[38px] flex-1 resize-none bg-transparent px-1 py-2 text-[13.5px] text-fg/90 outline-none placeholder:text-fg/25 disabled:opacity-50"
             />
             {pending ? (

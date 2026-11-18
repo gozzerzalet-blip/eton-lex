@@ -83,10 +83,17 @@ SEED_ADMIN_EMAIL=<TU_CORREO>
 SEED_ADMIN_PASSWORD=<CONTRASEÑA_LARGA>
 SEED_ADMIN_NAME=Zalet Gozzer
 
-AI_PROVIDER=none
-AI_FALLBACK_PROVIDER=pollinations
-AI_FALLBACK_MODEL=openai-fast
-AI_FALLBACK_BASE_URL=https://text.pollinations.ai
+AI_PROVIDER=pollinations
+AI_MODEL=openai-fast
+AI_BASE_URL=https://text.pollinations.ai
+
+# Instalaciones desplegadas antes de esta corrección pueden conservar
+# AI_PROVIDER=none con el respaldo gratuito; el backend lo promueve a principal
+# para que una explicación no caiga en modo biblioteca.
+# AI_FALLBACK_PROVIDER=pollinations
+# AI_FALLBACK_MODEL=openai-fast
+# AI_FALLBACK_BASE_URL=https://text.pollinations.ai
+
 AI_WEB_RESEARCH=true
 
 # Correos transaccionales: Brevo Free (300 correos/día, sin tarjeta)
@@ -99,6 +106,11 @@ SMTP_FROM=ETON LEX <correo-verificado-en-brevo>
 
 DEMO_MODE=false
 ```
+
+`AI_PROVIDER=pollinations` es gratuito y no necesita clave. Si tu servicio ya tenía
+`AI_PROVIDER=none` y `AI_FALLBACK_*` apuntando a Pollinations, no necesitas cambiar
+las variables: el backend promueve ese respaldo a proveedor principal. Así una
+petición como «explícame…» usa el modelo y no devuelve el artículo literal.
 
 Genera `JWT_SECRET` con:
 

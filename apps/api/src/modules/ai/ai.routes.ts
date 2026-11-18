@@ -182,6 +182,68 @@ function buildLibraryAnswer(query: string, blocks: RetrievedBlock[], web: Retrie
   return out.join('\n');
 }
 
+const EXPLANATION_RE =
+  /\b(expl[ií]came|explica|explicaci[oó]n|qu[eé] es|qu[eé] significa|significado|definici[oó]n|definir|concepto|c[oó]mo funciona|por qu[eé]|diferencia(?:s)?|comparaci[oó]n|compara|naturaleza jur[ií]dica|principio|teor[ií]a)\b/i;
+
+export function isExplanationQuery(query: string): boolean {
+  return EXPLANATION_RE.test(query);
+}
+
+function shortQuote(text: string, maxWords = 25): string {
+  const words = text.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  const quote = words.slice(0, maxWords).join(' ');
+  return words.length > maxWords ? `${quote}…` : quote;
+}
+
+/**
+ * Modo degradado para preguntas de explicación cuando no hay modelo activo.
+ * No finge ser IA y nunca transcribe el artículo completo: solo ordena la
+ * lectura de la fuente y deja un fragmento breve para verificar la redacción.
+ */
+function buildGuidedExplanation(query: string, blocks: RetrievedBlock[], web: RetrievedBlock[] = []): string {
+  const main = blocks.find((b) => b.kind === 'article')
+    ?? blocks.find((b) => b.kind === 'userdoc')
+    ?? blocks[0];
+
+  const out: string[] = [
+    '**Explicación guiada (sin modelo de lenguaje conectado).**',
+    '',
+    'Esto no es una respuesta de IA: al no haber proveedor activo no puedo redactar una explicación propia con seguridad. Te oriento con la fuente encontrada, sin copiar el artículo completo.',
+    '',
+  ];
+
+  if (!main) {
+    out.push('No se encontró una fuente que permita explicar esa consulta.');
+    out.push('');
+    out.push('Prueba con el número de artículo y la norma, por ejemplo «artículo 196 del Código Civil», o activa un proveedor gratuito para análisis con ejemplos.');
+  } else {
+    out.push(`**Fuente [F1]:** ${main.label}${main.meta ? ` · ${main.meta}` : ''}`);
+    out.push('');
+    out.push(`Fragmento breve para contrastar: «${shortQuote(main.text)}»`);
+    out.push('');
+    out.push('**Cómo leerla:**');
+    out.push('- **Regla:** identifica qué facultad u obligación reconoce.');
+    out.push('- **Supuesto:** revisa en qué situación se aplica.');
+    out.push('- **Efecto:** verifica la consecuencia jurídica y si hay excepciones.');
+    out.push('');
+    out.push('Abre la fuente para confirmar la redacción exacta, la vigencia y los antecedentes. Para una explicación con ejemplos y lenguaje sencillo, activa un proveedor gratuito o usa el Tutor.');
+    if (main.url) {
+      out.push('');
+      out.push(`Enlace: ${main.url}`);
+    }
+  }
+
+  if (web.length > 0) {
+    out.push('');
+    out.push('**Fuentes externas encontradas (sin análisis de IA)**');
+    for (const src of web.slice(0, 5)) out.push(`- ${src.label}${src.url ? ` — ${src.url}` : ''}`);
+  }
+
+  out.push('');
+  out.push(`Consulta orientada: «${query.slice(0, 300)}»`);
+  return out.join('\n');
+}
+
 /** Registro de consumo real; nunca se estima un coste que no conocemos. */
 function recordUsage(entry: {
   userId: string;
@@ -474,13 +536,16 @@ aiRouter.post('/conversations/:id/messages', asyncHandler(async (req, res) => {
   const allBlocks = [...libraryBlocks, ...webBlocks];
   const citations = allBlocks.map(citationFor);
 
-  // Sin proveedor de IA, el chat no se bloquea: responde en «modo biblioteca»
-  // con el texto literal de los artículos encontrados, sin inventar nada.
+  // Sin proveedor de IA, el chat no se bloquea. Una explicación recibe una
+  // lectura guiada y acotada; una consulta literal sigue en modo biblioteca.
   if (!providerInfo().configured) {
-    const answer = buildLibraryAnswer(userContent || 'documento adjunto', libraryBlocks, webBlocks);
+    const explanation = isExplanationQuery(userContent);
+    const answer = explanation
+      ? buildGuidedExplanation(userContent || 'documento adjunto', libraryBlocks, webBlocks)
+      : buildLibraryAnswer(userContent || 'documento adjunto', libraryBlocks, webBlocks);
     send('meta', {
       userMessageId,
-      mode: 'biblioteca',
+      mode: explanation ? 'guiada' : 'biblioteca',
       libraryMode: true,
       plan: planPayload,
       tools: toolsOutcome.runs,
@@ -501,7 +566,7 @@ aiRouter.post('/conversations/:id/messages', asyncHandler(async (req, res) => {
       answer,
       JSON.stringify(citations),
       JSON.stringify(allBlocks.map((b) => ({ label: b.label, url: b.url, kind: b.kind }))),
-      'biblioteca',
+      explanation ? 'guia' : 'biblioteca',
       Date.now() - started,
     );
     db.prepare("UPDATE ai_conversations SET updated_at = datetime('now') WHERE id = ?").run(conv.id);
@@ -510,7 +575,7 @@ aiRouter.post('/conversations/:id/messages', asyncHandler(async (req, res) => {
       conversationId: conv.id,
       role: 'biblioteca',
       provider: 'none',
-      model: 'biblioteca',
+      model: explanation ? 'guia' : 'biblioteca',
       promptChars: query.length,
       completionChars: answer.length,
       latencyMs: Date.now() - started,
@@ -522,6 +587,7 @@ aiRouter.post('/conversations/:id/messages', asyncHandler(async (req, res) => {
       citations,
       latencyMs: Date.now() - started,
       libraryMode: true,
+      mode: explanation ? 'guiada' : 'biblioteca',
     });
     res.end();
     return;

@@ -3,7 +3,7 @@
 Este documento es la fuente de verdad del avance por fases. Se actualiza al
 terminar **cada fase**, con pruebas reales ejecutadas, no con intenciones.
 
-Última actualización: **2026-11-18 — Fase 5 completada**.
+Última actualización: **2026-11-18 — Fase 5 completada y ETON AI corregida**.
 
 ## Decisiones vigentes
 
@@ -294,6 +294,47 @@ npm run db:restore -- <directorio-del-respaldo> --confirm
   responde `401 UNAUTHORIZED`, prueba de que el router de Fase 5 está activo en
   producción y exige sesión. El bloqueo anterior por falta de `git`/`gh` quedó
   resuelto instalando Git for Windows con winget.
+
+## Corrección: explicaciones ya no caen en «Modo biblioteca»
+
+### Causa
+
+La configuración publicada dejaba `AI_PROVIDER=none` y configuraba solo el
+respaldo gratuito (`AI_FALLBACK_PROVIDER=pollinations`). El código miraba
+`providerInfo().configured`, que dependía del proveedor principal, así que el
+respaldo nunca se usaba en el chat: cada «explícame…» terminaba en modo
+biblioteca con el artículo transcrito.
+
+### Cambios aplicados
+
+- `apps/api/src/config.ts`: si no hay proveedor principal pero sí un respaldo
+  válido, ese respaldo se promueve a principal. El destino no se duplica como
+  respaldo. Además, un proveedor sin modelo ya no se anuncia como conectado.
+- `apps/api/src/modules/ai/ai.routes.ts`: sin modelo activo, las consultas de
+  explicación usan un modo guiado honesto: ordenan la lectura de la fuente,
+  muestran un fragmento máximo de 25 palabras y nunca transcriben el artículo
+  completo. Las consultas literales conservan el modo biblioteca.
+- `apps/web/src/pages/AiChat.tsx`: el aviso sin proveedor dice «Modo guiado» y
+  explica la diferencia entre explicación orientada y texto literal.
+- `docs/SUGA-FREE.md`: instalaciones nuevas usan Pollinations como principal;
+  las ya desplegadas con `AI_PROVIDER=none` + respaldo gratuito siguen válidas.
+- Pruebas: `ai-config.test.ts` comprueba la promoción del respaldo, que sin
+  proveedor no se finja configuración y que un proveedor sin modelo no se
+  anuncie; `ai-contract-probe.ts` comprueba que «Explícame…» devuelve
+  `Explicación guiada` y no `Modo biblioteca`.
+
+### Verificación local
+
+- `npm run typecheck`: OK.
+- `npm --workspace apps/api run test`: **23/23 pruebas OK**
+  (9 humo + 2 Fase 0 + 3 configuración IA + 3 Fase 1 + 3 Fase 2 + 2 Fase 3 + 1 Fase 5).
+- Reproducción HTTP con las variables de Suga (`AI_PROVIDER=none`,
+  `AI_FALLBACK_PROVIDER=pollinations`): `configured=true`,
+  `provider=pollinations`, `libraryMode=false` en el primer `meta`, sin evento
+  `error`, y una explicación redactada por el modelo sobre la posesión.
+- `npm run build`: OK (`index-D3SJ0-xx.js`, `index-ceP4-9cu.css`).
+- `npm run deploy:check`: OK antes del despliegue de esta corrección; seguía
+  informando «IA: no configurada» porque Suga aún servía la versión anterior.
 
 ## Reglas que se mantienen en todas las fases
 

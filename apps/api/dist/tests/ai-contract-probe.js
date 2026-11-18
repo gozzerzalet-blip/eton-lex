@@ -87,12 +87,34 @@ try {
     assert.match(done.content, /Modo biblioteca/);
     const usage = db.prepare("SELECT COUNT(*) AS n FROM ai_usage WHERE user_id = ? AND role = 'biblioteca'").get(userId);
     assert.equal(usage.n, 1, 'el modo biblioteca debe registrar consumo real');
+    const explainRes = await fetch(`${base}/api/ai/conversations/${conversation.id}/messages`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ content: 'Explícame qué es la ley 12345' }),
+    });
+    assert.equal(explainRes.status, 200);
+    const explainRaw = await explainRes.text();
+    const explainEvents = [];
+    for (const chunk of explainRaw.split(/\r?\n\r?\n/)) {
+        const eventLine = chunk.split(/\r?\n/).find((l) => l.startsWith('event: '));
+        const dataLine = chunk.split(/\r?\n/).find((l) => l.startsWith('data: '));
+        if (!eventLine || !dataLine)
+            continue;
+        explainEvents.push({ event: eventLine.slice(7), data: JSON.parse(dataLine.slice(6)) });
+    }
+    const explainDone = explainEvents.find((e) => e.event === 'done');
+    assert.ok(explainDone, 'la explicación debe terminar con done');
+    assert.match(explainDone.data.content, /Explicación guiada/);
+    assert.doesNotMatch(explainDone.data.content, /Modo biblioteca/);
+    assert.equal(explainDone.data.mode, 'guiada');
+    assert.ok(explainDone.data.content.length < 1400, 'no debe transcribir la norma completa');
     console.log(JSON.stringify({
         ok: true,
         status: { router: status.router.mode, tools: status.tools.length, modes: status.modes.length },
         sseEvents: [...new Set(names)],
         toolRuns: firstMeta.tools.map((t) => t.name),
         usageRows: usage.n,
+        guidedExplanation: true,
     }));
 }
 finally {

@@ -20,6 +20,8 @@ function runProbe(name: string): Record<string, any> {
     EMBEDDING_MODEL: '',
     AI_PROVIDER: 'none',
     AI_MODEL: '',
+    AI_FALLBACK_PROVIDER: 'none',
+    AI_FALLBACK_MODEL: '',
     AI_WEB_RESEARCH: 'false',
   };
   const result = spawnSync(process.execPath, ['--import', 'tsx', path.join(here, name)], {
