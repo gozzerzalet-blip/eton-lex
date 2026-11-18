@@ -32,8 +32,19 @@ const strip = (html) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(
 export async function ingestNews() {
     const feeds = parseFeedList(config.news.feeds);
     const result = { configured: feeds.length > 0 || Boolean(config.news.newsApiKey), feeds: feeds.length, inserted: 0, skipped: 0, errors: [] };
-    if (!result.configured)
+    const runId = uuid();
+    const finishRun = (error) => {
+        db.prepare(`
+      UPDATE ingest_runs
+      SET finished_at = datetime('now'), status = ?, stats = ?, error = ?
+      WHERE id = ?
+    `).run('done', JSON.stringify({ feeds: feeds.length, inserted: result.inserted, skipped: result.skipped, errors: result.errors.length }), error, runId);
+    };
+    db.prepare(`INSERT INTO ingest_runs (id, source_key, started_at, status) VALUES (?, 'news', datetime('now'), 'running')`).run(runId);
+    if (!result.configured) {
+        finishRun(null);
         return result;
+    }
     const insert = db.prepare(`
     INSERT OR IGNORE INTO news
       (id, external_id, title, summary, body, source_name, source_url, image_url, country, scope, category, relevance, published_at, hash)
@@ -52,7 +63,9 @@ export async function ingestNews() {
                     continue;
                 const externalId = hash(`${feed.url}::${item.guid ?? link}`);
                 const summary = strip(item.contentSnippet ?? item.summary ?? '').slice(0, 600);
-                const body = strip(item['content:encoded'] ?? item.content ?? item.contentSnippet ?? '').slice(0, 20_000);
+                // Guardamos solo título, resumen y enlace: no reproducimos el texto
+                // completo de fuentes externas. La ficha invita a leer la original.
+                const body = null;
                 const published = item.isoDate ?? (item.pubDate ? new Date(item.pubDate).toISOString() : null);
                 const info = insert.run(uuid(), externalId, title, summary, body, sourceName, link, extractImage(item), feed.scope === 'internacional' ? 'Internacional' : 'Perú', feed.scope, feed.category, null, published, hash(title + link));
                 if (info.changes > 0)
@@ -80,7 +93,7 @@ export async function ingestNews() {
                 if (!a.url || !a.title)
                     continue;
                 const externalId = hash(`newsapi::${a.url}`);
-                const info = insert.run(uuid(), externalId, a.title, strip(a.description ?? '').slice(0, 600), strip(a.content ?? '').slice(0, 20_000), a.source?.name ?? 'NewsAPI', a.url, a.urlToImage ?? null, 'Perú', 'nacional', 'Actualidad jurídica', null, a.publishedAt ?? null, hash(a.title + a.url));
+                const info = insert.run(uuid(), externalId, a.title, strip(a.description ?? '').slice(0, 600), null, a.source?.name ?? 'NewsAPI', a.url, a.urlToImage ?? null, 'Perú', 'nacional', 'Actualidad jurídica', null, a.publishedAt ?? null, hash(a.title + a.url));
                 if (info.changes > 0)
                     result.inserted++;
                 else
@@ -91,6 +104,9 @@ export async function ingestNews() {
             result.errors.push({ feed: 'newsapi', error: err.message });
         }
     }
+    finishRun(result.errors.length
+        ? result.errors.map((error) => `${error.feed}: ${error.error}`).join('; ').slice(0, 2000)
+        : null);
     if (result.inserted > 0) {
         const followers = db.prepare(`
       SELECT DISTINCT f.user_id FROM follows f WHERE f.target_type = 'area'
