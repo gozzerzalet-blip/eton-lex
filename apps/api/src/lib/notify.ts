@@ -15,6 +15,14 @@ export function emitToConversation(conversationId: string, event: string, payloa
   io?.to(`conv:${conversationId}`).emit(event, payload);
 }
 
+/** Suscribe las sesiones abiertas de un usuario a una conversación recién creada. */
+export function joinUserToConversation(userId: string, conversationId: string) {
+  if (!io) return;
+  for (const socket of io.sockets.sockets.values()) {
+    if ((socket.data.userId as string | undefined) === userId) socket.join(`conv:${conversationId}`);
+  }
+}
+
 export function emitToRoom(roomId: string, event: string, payload: unknown) {
   io?.to(`room:${roomId}`).emit(event, payload);
 }
