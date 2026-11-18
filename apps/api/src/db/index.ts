@@ -34,6 +34,7 @@ export function migrate(): void {
       ['public_id', 'TEXT'],
       ['links', "TEXT NOT NULL DEFAULT '[]'"],
       ['privacy_fields', "TEXT NOT NULL DEFAULT '{}'"],
+      ['bubble_colors', "TEXT NOT NULL DEFAULT '{}'"],
     ];
     for (const [name, ddl] of essential) {
       if (!existing.has(name)) db.exec(`ALTER TABLE users ADD COLUMN ${name} ${ddl}`);
@@ -72,6 +73,7 @@ export function migrate(): void {
     ['public_id', 'TEXT'],
     ["links", "TEXT NOT NULL DEFAULT '[]'"],
     ["privacy_fields", "TEXT NOT NULL DEFAULT '{}'"],
+    ["bubble_colors", "TEXT NOT NULL DEFAULT '{}'"],
     ['email_verified', 'INTEGER NOT NULL DEFAULT 0'],
   ];
   for (const [name, ddl] of userAdditions) {
