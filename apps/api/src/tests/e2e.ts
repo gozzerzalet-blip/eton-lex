@@ -78,6 +78,14 @@ function waitFor<T = any>(socket: Socket, event: string, timeout = 8_000): Promi
   });
 }
 
+function expectNoEvent(socket: Socket, event: string, timeout = 600): Promise<void> {
+  return new Promise((resolve) => {
+    const handler = () => { /* señal inesperada */ };
+    socket.on(event, handler);
+    setTimeout(() => { socket.off(event, handler); resolve(); }, timeout);
+  });
+}
+
 async function main() {
   console.log(`ETON LEX · e2e contra ${BASE}\n`);
 
@@ -105,7 +113,15 @@ async function main() {
   assert.equal(registerB.status, 201, JSON.stringify(registerB.data));
   const tokenB = registerB.data.accessToken as string;
   const userB = registerB.data.user as Json;
-  ok('registro real de dos estudiantes');
+
+  const registerC = await request('/api/auth/register', {
+    method: 'POST',
+    body: { name: 'E2E Carlos', email: `e2e.carlos.${stamp}@etonlex.test`, password: PASSWORD, university: 'UNMSM' },
+  });
+  assert.equal(registerC.status, 201, JSON.stringify(registerC.data));
+  const tokenC = registerC.data.accessToken as string;
+  const userC = registerC.data.user as Json;
+  ok('registro real de tres estudiantes');
 
   const me = await request('/api/auth/me', { token: tokenA });
   assert.equal(me.status, 200);
@@ -120,6 +136,67 @@ async function main() {
   });
   assert.equal(login.status, 200);
   ok('inicio de sesión con contraseña');
+
+  // ── Privacidad: nadie ve cuentas ajenas sin contacto aceptado ─
+  const socketA = await connect(tokenA);
+  const socketBPrivacy = await connect(tokenB);
+  const socketCPrivacy = await connect(tokenC);
+  ok('sesiones Socket.IO reales para A, B y C (A y B aún no son contactos)');
+
+  const listBefore = await request(`/api/users?q=${encodeURIComponent(`e2e.andrea.${stamp}@etonlex.test`)}`, { token: tokenB });
+  assert.equal(listBefore.status, 200);
+  assert.equal(listBefore.data.contactsOnly, true);
+  assert.equal(listBefore.data.users.length, 0);
+  ok('API no revela cuentas que no son contactos');
+
+  const profileDenied = await request(`/api/users/${userA.id}`, { token: tokenC });
+  assert.equal(profileDenied.status, 404);
+  ok('perfil privado rechazado por identificador manipulado');
+
+  const presenceC = waitFor<Json>(socketCPrivacy, 'presence:list');
+  socketCPrivacy.emit('presence:sync');
+  const visibleToC = await presenceC;
+  assert.ok(!visibleToC.online.includes(userA.id));
+  assert.ok(!visibleToC.online.includes(userB.id));
+  ok('presencia limitada: C no ve a A ni a B');
+
+  const presenceB = waitFor<Json>(socketBPrivacy, 'presence:list');
+  socketBPrivacy.emit('presence:sync');
+  const visibleToB = await presenceB;
+  assert.ok(!visibleToB.online.includes(userC.id));
+  ok('A en línea pero no contacto: B no ve su presencia');
+
+  const unauthorizedBoost = await request('/api/admin/overview', { token: tokenC });
+  assert.equal(unauthorizedBoost.status, 403);
+  ok('solicitud API no autorizada rechazada por rol');
+
+  const friendRequest = await request('/api/community/friends/request', {
+    method: 'POST', token: tokenA, body: { userId: userB.id },
+  });
+  assert.equal(friendRequest.status, 200, JSON.stringify(friendRequest.data));
+  const friendsB = await request('/api/community/friends', { token: tokenB });
+  const requestId = friendsB.data.incoming.find((row: Json) => row.id === userA.id)?.request_id as string;
+  assert.ok(requestId);
+  const accept = await request(`/api/community/friends/${requestId}/respond`, {
+    method: 'POST', token: tokenB, body: { action: 'accept' },
+  });
+  assert.equal(accept.status, 200);
+  ok('contacto aceptado A-B habilita comunicaciones privadas');
+
+  const visibleAfter = await request(`/api/users?q=${encodeURIComponent(`e2e.andrea.${stamp}@etonlex.test`)}`, { token: tokenB });
+  assert.equal(visibleAfter.status, 200);
+  assert.ok(visibleAfter.data.users.some((row: Json) => row.id === userA.id));
+  const presenceAfter = waitFor<Json>(socketBPrivacy, 'presence:list');
+  socketBPrivacy.emit('presence:sync');
+  const afterList = await presenceAfter;
+  assert.ok(afterList.online.includes(userA.id));
+  ok('contacto aceptado: B ve perfil y presencia de A');
+
+  const noIncoming = expectNoEvent(socketBPrivacy, 'call:incoming');
+  socketCPrivacy.emit('call:invite', { callId: crypto.randomUUID(), to: userB.id, conversationId: crypto.randomUUID(), kind: 'audio' });
+  await noIncoming;
+  ok('señalización rechaza invitación de un usuario no autorizado');
+  socketCPrivacy.disconnect();
 
   // ── Biblioteca ──────────────────────────────────────────────
   const library = await request('/api/library?q=civil&pageSize=5');
@@ -170,8 +247,7 @@ async function main() {
   assert.equal(conversation.status, 201);
   const conversationId = conversation.data.conversation.id as string;
 
-  const socketA = await connect(tokenA);
-  const socketB = await connect(tokenB);
+  const socketB = socketBPrivacy;
   ok('dos sesiones Socket.IO autenticadas');
 
   const incoming = waitFor<Json>(socketB, 'message:new');
@@ -236,6 +312,28 @@ async function main() {
   assert.match(allowed.data.text, /ETON LEX/);
   ok('archivo compartido servido solo al destinatario');
 
+  // ── Mensaje de voz: token firmado y bytes reales ──────────────
+  const audioBytes = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+  const audioForm = new FormData();
+  audioForm.append('files', new File([audioBytes], 'nota-e2e.webm', { type: 'audio/webm' }));
+  const audioUpload = await request('/api/documents', { method: 'POST', token: tokenA, form: audioForm });
+  assert.equal(audioUpload.status, 201, JSON.stringify(audioUpload.data));
+  const audioId = audioUpload.data.documents[0].id as string;
+  const voiceMessage = await request(`/api/messaging/conversations/${conversationId}/messages`, {
+    method: 'POST', token: tokenA,
+    body: { kind: 'audio', attachmentId: audioId, body: 'Nota de voz de prueba' },
+  });
+  assert.equal(voiceMessage.status, 201, JSON.stringify(voiceMessage.data));
+  const tokenForB = await request(`/api/files/${audioId}/audio-token`, { token: tokenB });
+  assert.equal(tokenForB.status, 200);
+  const audioForB = await request(`/api/files/${audioId}?token=${encodeURIComponent(tokenForB.data.token)}`, { raw: true });
+  assert.equal(audioForB.status, 200);
+  assert.equal(audioForB.data.headers.get('content-type'), 'audio/webm');
+  assert.match(audioForB.data.headers.get('content-disposition') ?? '', /inline/);
+  const tokenForC = await request(`/api/files/${audioId}/audio-token`, { token: tokenC });
+  assert.equal(tokenForC.status, 403);
+  ok('mensaje de voz reproducible por el receptor con token firmado y bloqueado a terceros');
+
   // ── Portada del perfil ───────────────────────────────────────
   const coverForm = new FormData();
   coverForm.append('cover', new File(
@@ -280,6 +378,13 @@ async function main() {
   assert.equal(callHistory.status, 200);
   assert.ok(callHistory.data.calls.some((c: Json) => c.id === callId));
   ok('señalización WebRTC y historial de llamada persistidos');
+
+  const socketCEnd = await connect(tokenC);
+  const noForeignEnd = expectNoEvent(socketCEnd, 'call:ended');
+  socketB.emit('call:end', { callId, to: userC.id, durationS: 1 });
+  await noForeignEnd;
+  socketCEnd.disconnect();
+  ok('call:end ignora un destinatario manipulado y solo notifica al participante real');
 
   // ── Permisos ────────────────────────────────────────────────
   const admin = await request('/api/admin/overview', { token: tokenA });
