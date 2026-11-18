@@ -474,6 +474,10 @@ authRouter.patch('/me', requireAuth, asyncHandler(async (req, res) => {
       activity: z.enum(['friends', 'private']).optional(),
     }).optional(),
     privacyFields: z.record(z.enum(['everyone', 'friends', 'private'])).optional(),
+    bubbleColors: z.object({
+      mine: z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Color de mensajes enviados no válido.'),
+      other: z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Color de mensajes recibidos no válido.'),
+    }).optional(),
   }).parse(req.body);
 
   const fields: string[] = [];
@@ -498,6 +502,7 @@ authRouter.patch('/me', requireAuth, asyncHandler(async (req, res) => {
   if (data.onboarded !== undefined) { fields.push('onboarded = ?'); values.push(data.onboarded ? 1 : 0); }
   if (data.privacy !== undefined) { fields.push('privacy = ?'); values.push(JSON.stringify(data.privacy)); }
   if (data.privacyFields !== undefined) { fields.push('privacy_fields = ?'); values.push(JSON.stringify(data.privacyFields)); }
+  if (data.bubbleColors !== undefined) { fields.push('bubble_colors = ?'); values.push(JSON.stringify(data.bubbleColors)); }
   if (data.links !== undefined) { fields.push('links = ?'); values.push(JSON.stringify(data.links)); }
   if (fields.length) {
     fields.push('updated_at = datetime(\'now\')');
