@@ -88,32 +88,115 @@ usersRouter.get('/lookup', asyncHandler(async (req, res) => {
   });
 }));
 
-usersRouter.get('/:id', asyncHandler(async (req, res) => {
-  if (req.params.id !== req.user!.id && !acceptedContactIds(req.user!.id).includes(req.params.id)) {
-    throw notFound('Estudiante no encontrado.');
-  }
-  const profile = publicUser(req.params.id, false, req.user!.id);
-  if (!profile) throw notFound('Estudiante no encontrado.');
+/**
+ * Búsqueda global parcial de personas.
+ * Solo devuelve datos públicos del perfil (nombre, usuario, foto y universidad)
+ * y nunca mensajes, archivos, correos ni conversaciones. Está disponible aunque
+ * no exista amistad, tal como exige el flujo de "agregar amigos".
+ */
+usersRouter.get('/search', asyncHandler(async (req, res) => {
+  const q = String(req.query.q ?? '').trim();
+  if (q.length < 2) { res.json({ users: [] }); return; }
+  const limit = Math.min(Number(req.query.limit ?? 20) || 20, 50);
+  const pattern = `%${q}%`;
+  const rows = db.prepare(`
+    SELECT u.id, u.name, u.username, u.public_id, u.avatar_url, u.university
+    FROM users u
+    WHERE u.id != ?
+      AND (u.name LIKE ? OR u.username LIKE ? OR u.public_id LIKE ?)
+    ORDER BY u.name ASC
+    LIMIT ?
+  `).all(req.user!.id, pattern, pattern, pattern, limit) as any[];
 
+  const users = rows.map((row) => {
+    const friendship = db.prepare(`
+      SELECT requester_id, status FROM friendships
+      WHERE (requester_id = ? AND addressee_id = ?) OR (requester_id = ? AND addressee_id = ?)
+      LIMIT 1
+    `).get(req.user!.id, row.id, row.id, req.user!.id) as { requester_id: string; status: string } | undefined;
+
+    const status = friendship?.status;
+    const relation = status === 'accepted' ? 'accepted'
+      : status === 'pending' ? 'pending'
+        : status === 'blocked' ? 'blocked'
+          : 'none';
+    const direction = friendship?.status === 'pending'
+      ? (friendship.requester_id === row.id ? 'incoming' : 'outgoing')
+      : undefined;
+
+    return {
+      id: row.id,
+      name: row.name,
+      username: row.username ?? null,
+      publicId: row.public_id ?? null,
+      avatarUrl: row.avatar_url ?? null,
+      university: row.university ?? null,
+      relation,
+      ...(direction ? { direction } : {}),
+    };
+  });
+
+  res.json({ users });
+}));
+
+usersRouter.get('/:id', asyncHandler(async (req, res) => {
+  const viewerId = req.user!.id;
+  const targetId = req.params.id;
+
+  // La ficha pública debe estar disponible aunque todavía no haya amistad;
+  // de lo contrario no se podría enviar una solicitud desde el perfil.
+  const basic = db.prepare(`
+    SELECT id, name, username, public_id, avatar_url, university, cycle
+    FROM users WHERE id = ?
+  `).get(targetId) as any;
+  if (!basic) throw notFound('Estudiante no encontrado.');
+
+  const full = publicUser(targetId, false, viewerId);
   const relation = db.prepare(`
     SELECT * FROM friendships WHERE (requester_id = ? AND addressee_id = ?) OR (requester_id = ? AND addressee_id = ?)
-  `).get(req.user!.id, req.params.id, req.params.id, req.user!.id) as any;
+  `).get(viewerId, targetId, targetId, viewerId) as any;
+
+  const relationResponse = relation
+    ? { id: relation.id, status: relation.status, direction: relation.requester_id === viewerId ? 'outgoing' : 'incoming' }
+    : null;
+
+  if (!full) {
+    // Perfil privado o sin amistad: solo datos públicos mínimos, sin correo,
+    // documentos, grupos ni campos personales.
+    res.json({
+      user: {
+        id: basic.id,
+        name: basic.name,
+        username: basic.username ?? null,
+        publicId: basic.public_id ?? null,
+        avatarUrl: basic.avatar_url ?? null,
+        online: false,
+        friends: 0,
+      },
+      relation: relationResponse,
+      groups: [],
+      documents: [],
+      limited: true,
+    });
+    return;
+  }
 
   const groups = db.prepare(`
     SELECT g.id, g.name, g.description, g.visibility FROM study_groups g
     JOIN group_members m ON m.group_id = g.id WHERE m.user_id = ?
-  `).all(req.params.id);
+  `).all(targetId);
 
   const shared = db.prepare(`
     SELECT d.id, d.name, d.mime, d.size, d.created_at FROM documents d
     WHERE d.owner_id = ? AND d.visibility = 'shared' ORDER BY d.created_at DESC LIMIT 20
-  `).all(req.params.id);
+  `).all(targetId);
 
   res.json({
-    user: { ...profile, email: profile.id === req.user!.id ? profile.email : undefined },
-    relation: relation ? { id: relation.id, status: relation.status, direction: relation.requester_id === req.user!.id ? 'outgoing' : 'incoming' } : null,
+    user: { ...full, email: full.id === viewerId ? full.email : undefined },
+    relation: relationResponse,
     groups,
     documents: shared,
+    limited: false,
   });
 }));
 
