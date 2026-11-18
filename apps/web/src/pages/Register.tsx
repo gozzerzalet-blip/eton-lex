@@ -15,8 +15,12 @@ export default function Register() {
   const [academic, setAcademic] = useState<AcademicSelection>({ ...emptyAcademicSelection, cycle: '' });
   const [city, setCity] = useState('');
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [emailConfigured, setEmailConfigured] = useState(false);
+  const [verificationEmail, setVerificationEmail] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
   const [loading, setLoading] = useState(false);
-  const { setSession } = useAuth();
+  const { setSession, setUser } = useAuth();
   const navigate = useNavigate();
 
   const next = (event: React.FormEvent) => {
@@ -35,8 +39,17 @@ export default function Register() {
       return;
     }
     setLoading(true);
+    setError('');
+    setNotice('');
     try {
-      const data = await api<{ accessToken: string; user: UserType }>('/auth/register', {
+      const data = await api<{
+        accessToken: string;
+        user: UserType;
+        email?: string;
+        emailConfigured?: boolean;
+        requiresEmailVerification?: boolean;
+        emailDeliveryFailed?: boolean;
+      }>('/auth/register', {
         method: 'POST',
         body: JSON.stringify({
           name: account.name.trim(),
@@ -56,9 +69,56 @@ export default function Register() {
         }),
       });
       setSession(data.user, data.accessToken);
+      if (data.emailConfigured) {
+        setEmailConfigured(true);
+        setVerificationEmail(data.email ?? account.email.trim());
+        setVerificationCode('');
+        setNotice(data.emailDeliveryFailed
+          ? 'No pudimos entregar el correo. Pulsa «Reenviar código» en unos instantes.'
+          : `Enviamos un código de 6 dígitos a ${data.email ?? account.email.trim()}.`);
+        setStep(3);
+        return;
+      }
       navigate('/');
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : 'No se pudo crear la cuenta.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const verifyEmail = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError('');
+    setNotice('');
+    setLoading(true);
+    try {
+      const data = await api<{ ok: boolean; user: UserType }>('/auth/verify-email', {
+        method: 'POST',
+        body: JSON.stringify({ code: verificationCode }),
+      });
+      setUser(data.user);
+      navigate('/');
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : 'No se pudo verificar el correo.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const resendVerification = async () => {
+    setError('');
+    setNotice('');
+    setLoading(true);
+    try {
+      const data = await api<{ message: string }>('/auth/resend-verification', {
+        method: 'POST',
+        body: '{}',
+      });
+      setNotice(data.message ?? 'Enviamos un nuevo código a tu correo.');
+      setVerificationCode('');
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : 'No se pudo reenviar el código.');
     } finally {
       setLoading(false);
     }
@@ -75,12 +135,28 @@ export default function Register() {
               <span className={step === 1 ? 'text-fg/80' : 'text-fg/30'}>01 · Cuenta</span>
               <span className="h-px w-8 bg-fg/15" />
               <span className={step === 2 ? 'text-fg/80' : 'text-fg/30'}>02 · Perfil académico</span>
+              {emailConfigured && (
+                <>
+                  <span className="h-px w-8 bg-fg/15" />
+                  <span className={step === 3 ? 'text-fg/80' : 'text-fg/30'}>03 · Correo</span>
+                </>
+              )}
             </div>
 
-            <h1 className="font-display text-[30px] leading-tight text-fg/95">{step === 1 ? 'Crea tu cuenta' : 'Tu perfil académico'}</h1>
+            <h1 className="font-display text-[30px] leading-tight text-fg/95">
+              {step === 1 ? 'Crea tu cuenta' : step === 2 ? 'Tu perfil académico' : 'Verifica tu correo'}
+            </h1>
             <p className="mt-2 text-[13px] leading-relaxed text-fg/40">
-              {step === 1 ? 'Acceso a la comunidad privada de estudiantes de Derecho.' : 'Selecciona tu universidad desde el catálogo oficial de SUNEDU.'}
+              {step === 1
+                ? 'Acceso a la comunidad privada de estudiantes de Derecho.'
+                : step === 2
+                  ? 'Selecciona tu universidad desde el catálogo oficial de SUNEDU.'
+                  : `Enviamos un código de 6 dígitos a ${verificationEmail}. Colócalo aquí para confirmar tu cuenta.`}
             </p>
+
+            {step === 3 && notice && (
+              <p className="mt-5 rounded-xl border border-fg/15 bg-white/50 px-3 py-2.5 text-[12px] leading-relaxed text-fg/70 dark:bg-white/[.05]">{notice}</p>
+            )}
 
             {step === 1 ? (
               <form onSubmit={next} className="mt-7 space-y-4">
@@ -150,6 +226,39 @@ export default function Register() {
                     {loading ? <Spinner size={15} className="border-paper/30 border-t-paper" /> : <>Crear cuenta <ArrowRight size={15} /></>}
                   </button>
                 </div>
+              </form>
+            )}
+
+            {step === 3 && (
+              <form onSubmit={verifyEmail} className="mt-7 space-y-4">
+                <div>
+                  <label className="label" htmlFor="register-code">Código de 6 dígitos</label>
+                  <input
+                    id="register-code"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    pattern="[0-9]{6}"
+                    required
+                    value={verificationCode}
+                    onChange={(e) => setVerificationCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    className="input text-center text-[17px] tracking-[0.4em]"
+                    placeholder="000000"
+                  />
+                </div>
+
+                {error && <p className="rounded-xl border border-dashed border-fg/25 bg-white/40 px-3 py-2.5 text-[12px] text-fg/70 dark:bg-white/[.04]">{error}</p>}
+
+                <button type="submit" disabled={loading} className="btn btn-primary w-full">
+                  {loading ? <Spinner size={15} className="border-paper/30 border-t-paper" /> : <>Verificar correo <ArrowRight size={15} /></>}
+                </button>
+                <button type="button" onClick={resendVerification} disabled={loading} className="flex w-full items-center justify-center gap-1.5 text-[12px] text-fg/40 transition-colors hover:text-fg/70">
+                  Reenviar código
+                </button>
+                <button type="button" onClick={() => navigate('/')} className="flex w-full items-center justify-center text-[11px] text-fg/30 transition-colors hover:text-fg/60">
+                  Continuar después
+                </button>
               </form>
             )}
 

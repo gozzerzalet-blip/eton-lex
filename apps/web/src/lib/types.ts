@@ -25,6 +25,7 @@ export type User = {
   createdAt?: string;
   theme?: 'dark' | 'light';
   onboarded?: boolean;
+  emailVerified?: boolean;
   privacy?: { profile?: 'community' | 'friends' | 'private'; activity?: 'friends' | 'private' };
 };
 

@@ -26,44 +26,82 @@ function getTransport(): nodemailer.Transporter {
   return transport;
 }
 
+type CodeEmail = {
+  subject: string;
+  intro: string;
+  after: string;
+  ignoreNote: string;
+  logLabel: string;
+};
+
 /**
  * Envía el código real al correo de la cuenta. El código NO se devuelve en la
  * respuesta ni se escribe en logs: solo existe en el correo y su hash en la BD.
  */
-export async function sendPasswordResetCode(to: string, code: string): Promise<void> {
+async function deliverCode(to: string, code: string, email: CodeEmail): Promise<void> {
   const mailer = getTransport();
   const name = to.split('@')[0] || 'estudiante';
   try {
     await mailer.sendMail({
       from: config.smtp.from,
       to,
-      subject: 'ETON LEX · Código para recuperar tu contraseña',
+      subject: email.subject,
       text: [
         `Hola ${name},`,
         '',
-        'Recibimos una solicitud para recuperar el acceso a tu cuenta de ETON LEX.',
+        email.intro,
         '',
         `Tu código es: ${code}`,
         '',
-        'Válido por 15 minutos. Si no fuiste tú, ignora este correo: tu contraseña seguirá igual.',
+        `Válido por 15 minutos. ${email.ignoreNote}`,
         '',
         'ETON LEX · El Derecho, siempre a tu alcance.',
       ].join('\n'),
       html: `<div style="font-family:Arial,sans-serif;line-height:1.6;color:#222">
         <p>Hola ${name},</p>
-        <p>Recibimos una solicitud para recuperar el acceso a tu cuenta de ETON LEX.</p>
+        <p>${email.intro}</p>
         <p style="font-size:26px;font-weight:700;letter-spacing:6px;margin:22px 0">${code}</p>
-        <p>Ese código es válido por <strong>15 minutos</strong> y sirve para elegir una nueva contraseña.</p>
-        <p>Si no fuiste tú, ignora este correo: tu contraseña seguirá igual.</p>
+        <p>Ese código es válido por <strong>15 minutos</strong>. ${email.after}</p>
+        <p>${email.ignoreNote}</p>
         <p style="font-size:12px;color:#777">ETON LEX · El Derecho, siempre a tu alcance.</p>
       </div>`,
     });
   } catch (err) {
-    console.error('[mail] no se pudo entregar el código de recuperación:', (err as Error).message);
+    console.error(`[mail] no se pudo entregar ${email.logLabel}:`, (err as Error).message);
     throw new ApiError(
       502,
       'EMAIL_DELIVERY_FAILED',
       'No se pudo entregar el correo. Revisa la dirección e inténtalo nuevamente en unos minutos.',
     );
   }
+}
+
+export async function sendPasswordResetCode(to: string, code: string): Promise<void> {
+  await deliverCode(to, code, {
+    subject: 'ETON LEX · Código para recuperar tu contraseña',
+    intro: 'Recibimos una solicitud para recuperar el acceso a tu cuenta de ETON LEX.',
+    after: 'Sirve para elegir una nueva contraseña.',
+    ignoreNote: 'Si no fuiste tú, ignora este correo: tu contraseña seguirá igual.',
+    logLabel: 'el código de recuperación',
+  });
+}
+
+export async function sendEmailVerificationCode(to: string, code: string): Promise<void> {
+  await deliverCode(to, code, {
+    subject: 'ETON LEX · Verifica tu correo',
+    intro: 'Creaste una cuenta en ETON LEX. Confirma tu correo para terminar el registro.',
+    after: 'Colócalo en la página de ETON LEX para confirmar tu cuenta.',
+    ignoreNote: 'Si no fuiste tú, ignora este correo.',
+    logLabel: 'el código de verificación de registro',
+  });
+}
+
+export async function sendLoginCode(to: string, code: string): Promise<void> {
+  await deliverCode(to, code, {
+    subject: 'ETON LEX · Código para ingresar',
+    intro: 'Pediste ingresar a ETON LEX con un código enviado a tu correo.',
+    after: 'Colócalo en la página de ETON LEX para entrar sin contraseña.',
+    ignoreNote: 'Si no fuiste tú, ignora este correo: tu cuenta sigue segura.',
+    logLabel: 'el código de ingreso',
+  });
 }

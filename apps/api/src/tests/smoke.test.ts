@@ -48,7 +48,7 @@ test('GET /api/system/capabilities informa la configuración real', async () => 
   const body = await response.json() as {
     ai: { configured: boolean; provider: string };
     news: { configured: boolean };
-    email: { configured: boolean; passwordReset: boolean };
+    email: { configured: boolean; passwordReset: boolean; emailVerification: boolean; loginCode: boolean };
     webrtc: { turn: boolean };
   };
   assert.equal(typeof body.ai.configured, 'boolean');
@@ -57,6 +57,8 @@ test('GET /api/system/capabilities informa la configuración real', async () => 
   assert.equal(typeof body.email.configured, 'boolean');
   assert.equal(typeof body.email.passwordReset, 'boolean');
   assert.equal(body.email.passwordReset, body.email.configured);
+  assert.equal(body.email.emailVerification, body.email.configured);
+  assert.equal(body.email.loginCode, body.email.configured);
   assert.equal(typeof body.webrtc.turn, 'boolean');
 });
 

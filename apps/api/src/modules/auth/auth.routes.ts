@@ -8,7 +8,7 @@ import {
   clearRefreshCookie, createRefreshToken, publicUser, requireAuth, revokeAllSessions,
   revokeSession, rotateRefreshToken, setRefreshCookie, signAccess, type SessionUser,
 } from '../../lib/auth.js';
-import { sendPasswordResetCode } from '../../lib/mailer.js';
+import { sendEmailVerificationCode, sendLoginCode, sendPasswordResetCode } from '../../lib/mailer.js';
 import { ApiError, asyncHandler, badRequest, conflict, unauthorized } from '../../lib/http.js';
 
 export const authRouter = Router();
@@ -20,6 +20,65 @@ const RESET_TTL_MINUTES = 15;
 const RESET_MAX_ATTEMPTS = 5;
 const RESET_RESEND_SECONDS = 60;
 const RESET_MESSAGE = 'Si el correo está registrado, enviamos un código con las instrucciones.';
+
+const VERIFY_TTL_MINUTES = 15;
+const VERIFY_MAX_ATTEMPTS = 5;
+const VERIFY_RESEND_SECONDS = 60;
+
+const LOGIN_TTL_MINUTES = 10;
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_RESEND_SECONDS = 60;
+const LOGIN_CODE_MESSAGE = 'Si el correo está registrado, enviamos un código para ingresar.';
+
+const EMAIL_NOT_READY = () => new ApiError(
+  503,
+  'EMAIL_NOT_CONFIGURED',
+  'El correo de la plataforma todavía no está configurado. Inténtalo más tarde.',
+);
+
+/** Genera un código nuevo, lo guarda solo como hash y lo envía al correo real. */
+async function issueEmailVerification(userId: string, email: string, ip?: string): Promise<void> {
+  const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+  const id = uuid();
+  db.prepare(`
+    INSERT INTO email_verifications (id, user_id, email, code_hash, expires_at, requested_ip)
+    VALUES (?, ?, ?, ?, datetime('now', '+${VERIFY_TTL_MINUTES} minutes'), ?)
+  `).run(id, userId, email, bcrypt.hashSync(code, 10), ip ?? null);
+
+  try {
+    await sendEmailVerificationCode(email, code);
+  } catch (err) {
+    db.prepare('DELETE FROM email_verifications WHERE id = ?').run(id);
+    throw err;
+  }
+
+  db.prepare(`
+    UPDATE email_verifications SET consumed_at = datetime('now')
+    WHERE user_id = ? AND id != ? AND consumed_at IS NULL
+  `).run(userId, id);
+}
+
+/** Código de ingreso sin contraseña: se envía solo al correo de la cuenta. */
+async function issueLoginCode(userId: string, email: string, ip?: string): Promise<void> {
+  const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+  const id = uuid();
+  db.prepare(`
+    INSERT INTO login_codes (id, user_id, email, code_hash, expires_at, requested_ip)
+    VALUES (?, ?, ?, ?, datetime('now', '+${LOGIN_TTL_MINUTES} minutes'), ?)
+  `).run(id, userId, email, bcrypt.hashSync(code, 10), ip ?? null);
+
+  try {
+    await sendLoginCode(email, code);
+  } catch (err) {
+    db.prepare('DELETE FROM login_codes WHERE id = ?').run(id);
+    throw err;
+  }
+
+  db.prepare(`
+    UPDATE login_codes SET consumed_at = datetime('now')
+    WHERE user_id = ? AND id != ? AND consumed_at IS NULL
+  `).run(userId, id);
+}
 
 const registerSchema = z.object({
   name: z.string().trim().min(2, 'Ingresa tu nombre.').max(80),
@@ -88,10 +147,31 @@ authRouter.post('/register', asyncHandler(async (req, res) => {
     `).run(uuid(), id, 'catalog-request', `Solicitud de universidad: ${data.missingUniversity}`);
   }
 
+  let requiresEmailVerification = false;
+  let emailDeliveryFailed = false;
+  if (config.smtp.configured) {
+    try {
+      await issueEmailVerification(id, data.email, req.ip);
+      requiresEmailVerification = true;
+    } catch (err) {
+      // La cuenta ya fue creada: conservarla permite reenviar el código después.
+      // Nunca se simula un envío ni se devuelve el código al navegador.
+      emailDeliveryFailed = true;
+      console.error('[auth] no se pudo enviar el código de verificación al registrar:', (err as Error).message);
+    }
+  }
+  logAudit(id, 'auth.register', { email: data.email, requiresEmailVerification }, req.ip);
+
   const user: SessionUser = { id, email: data.email, name: data.name, role: 'student', avatar_url: null };
   setRefreshCookie(res, createRefreshToken(id, req));
-  logAudit(id, 'auth.register', { email: data.email }, req.ip);
-  res.status(201).json({ accessToken: signAccess(user), user: publicUser(id, true) });
+  res.status(201).json({
+    accessToken: signAccess(user),
+    user: publicUser(id, true),
+    email: data.email,
+    emailConfigured: config.smtp.configured,
+    requiresEmailVerification,
+    emailDeliveryFailed,
+  });
 }));
 
 authRouter.post('/login', asyncHandler(async (req, res) => {
@@ -105,6 +185,81 @@ authRouter.post('/login', asyncHandler(async (req, res) => {
   db.prepare('UPDATE users SET last_seen_at = datetime(\'now\') WHERE id = ?').run(row.id);
   logAudit(row.id, 'auth.login', {}, req.ip);
   res.json({ accessToken: signAccess(user), user: publicUser(row.id, true) });
+}));
+
+// Ingreso con código: cualquier cuenta puede entrar aunque haya olvidado su
+// contraseña. El código solo llega al correo registrado; nunca se devuelve.
+authRouter.post('/request-login-code', asyncHandler(async (req, res) => {
+  if (!config.smtp.configured) throw EMAIL_NOT_READY();
+
+  const { email } = z.object({ email: emailSchema }).parse(req.body);
+  const user = db.prepare('SELECT id, email FROM users WHERE email = ?').get(email) as
+    | { id: string; email: string }
+    | undefined;
+
+  if (user) {
+    db.prepare(`
+      DELETE FROM login_codes
+      WHERE email = ? AND (expires_at <= datetime('now') OR consumed_at IS NOT NULL)
+    `).run(email);
+
+    const recent = db.prepare(`
+      SELECT created_at FROM login_codes
+      WHERE email = ? AND consumed_at IS NULL
+      ORDER BY created_at DESC LIMIT 1
+    `).get(email) as { created_at: string } | undefined;
+
+    const secondsSince = recent
+      ? (Date.now() - new Date(`${recent.created_at.replace(' ', 'T')}Z`).getTime()) / 1000
+      : Infinity;
+
+    if (secondsSince >= LOGIN_RESEND_SECONDS) {
+      await issueLoginCode(user.id, email, req.ip);
+      logAudit(user.id, 'auth.request_login_code', {}, req.ip);
+    }
+  }
+
+  // Misma respuesta siempre: no revela si la cuenta existe.
+  res.json({ ok: true, message: LOGIN_CODE_MESSAGE });
+}));
+
+authRouter.post('/login-with-code', asyncHandler(async (req, res) => {
+  if (!config.smtp.configured) throw EMAIL_NOT_READY();
+
+  const data = z.object({
+    email: emailSchema,
+    code: z.string().trim().regex(/^\d{6}$/, 'El código debe tener 6 dígitos.'),
+  }).parse(req.body);
+
+  const row = db.prepare(`
+    SELECT * FROM login_codes
+    WHERE email = ? AND consumed_at IS NULL AND expires_at > datetime('now')
+    ORDER BY created_at DESC LIMIT 1
+  `).get(data.email) as any;
+
+  if (!row) throw badRequest('El código expiró o no es válido. Solicita uno nuevo.');
+
+  if (!bcrypt.compareSync(data.code, row.code_hash)) {
+    const attempts = row.attempts + 1;
+    if (attempts >= LOGIN_MAX_ATTEMPTS) {
+      db.prepare("UPDATE login_codes SET consumed_at = datetime('now') WHERE id = ?").run(row.id);
+      throw badRequest('Demasiados intentos incorrectos. Solicita un código nuevo.');
+    }
+    db.prepare('UPDATE login_codes SET attempts = ? WHERE id = ?').run(attempts, row.id);
+    throw badRequest('El código no es correcto.');
+  }
+
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(row.user_id) as any;
+  if (!user) throw badRequest('El código expiró o no es válido. Solicita uno nuevo.');
+
+  db.prepare("UPDATE login_codes SET consumed_at = datetime('now') WHERE id = ?").run(row.id);
+  const sessionUser: SessionUser = {
+    id: user.id, email: user.email, name: user.name, role: user.role, avatar_url: user.avatar_url,
+  };
+  setRefreshCookie(res, createRefreshToken(user.id, req));
+  db.prepare('UPDATE users SET last_seen_at = datetime(\'now\') WHERE id = ?').run(user.id);
+  logAudit(user.id, 'auth.login_with_code', {}, req.ip);
+  res.json({ accessToken: signAccess(sessionUser), user: publicUser(user.id, true) });
 }));
 
 authRouter.post('/forgot-password', asyncHandler(async (req, res) => {
@@ -195,6 +350,75 @@ authRouter.post('/reset-password', asyncHandler(async (req, res) => {
   logAudit(row.user_id, 'auth.reset_password', {}, req.ip);
   clearRefreshCookie(res);
   res.json({ ok: true, message: 'Contraseña actualizada. Ahora puedes iniciar sesión.' });
+}));
+
+authRouter.post('/verify-email', requireAuth, asyncHandler(async (req, res) => {
+  if (!config.smtp.configured) throw EMAIL_NOT_READY();
+
+  const { code } = z.object({
+    code: z.string().trim().regex(/^\d{6}$/, 'El código debe tener 6 dígitos.'),
+  }).parse(req.body);
+
+  const row = db.prepare(`
+    SELECT * FROM email_verifications
+    WHERE user_id = ? AND consumed_at IS NULL AND expires_at > datetime('now')
+    ORDER BY created_at DESC LIMIT 1
+  `).get(req.user!.id) as any;
+
+  if (!row) throw badRequest('El código expiró o no es válido. Solicita uno nuevo.');
+
+  if (!bcrypt.compareSync(code, row.code_hash)) {
+    const attempts = row.attempts + 1;
+    if (attempts >= VERIFY_MAX_ATTEMPTS) {
+      db.prepare("UPDATE email_verifications SET consumed_at = datetime('now') WHERE id = ?").run(row.id);
+      throw badRequest('Demasiados intentos incorrectos. Solicita un código nuevo.');
+    }
+    db.prepare('UPDATE email_verifications SET attempts = ? WHERE id = ?').run(attempts, row.id);
+    throw badRequest('El código no es correcto.');
+  }
+
+  tx(() => {
+    db.prepare("UPDATE users SET email_verified = 1, updated_at = datetime('now') WHERE id = ?")
+      .run(req.user!.id);
+    db.prepare("UPDATE email_verifications SET consumed_at = datetime('now') WHERE user_id = ? AND consumed_at IS NULL")
+      .run(req.user!.id);
+  });
+  logAudit(req.user!.id, 'auth.verify_email', {}, req.ip);
+  res.json({ ok: true, user: publicUser(req.user!.id, true) });
+}));
+
+authRouter.post('/resend-verification', requireAuth, asyncHandler(async (req, res) => {
+  if (!config.smtp.configured) throw EMAIL_NOT_READY();
+
+  const user = db.prepare('SELECT id, email, email_verified FROM users WHERE id = ?')
+    .get(req.user!.id) as { id: string; email: string; email_verified: number };
+  if (user.email_verified) {
+    res.json({ ok: true, message: 'Tu correo ya está verificado.' });
+    return;
+  }
+
+  db.prepare(`
+    DELETE FROM email_verifications
+    WHERE user_id = ? AND (expires_at <= datetime('now') OR consumed_at IS NOT NULL)
+  `).run(user.id);
+
+  const recent = db.prepare(`
+    SELECT created_at FROM email_verifications
+    WHERE user_id = ? AND consumed_at IS NULL
+    ORDER BY created_at DESC LIMIT 1
+  `).get(user.id) as { created_at: string } | undefined;
+
+  const secondsSince = recent
+    ? (Date.now() - new Date(`${recent.created_at.replace(' ', 'T')}Z`).getTime()) / 1000
+    : Infinity;
+
+  if (secondsSince < VERIFY_RESEND_SECONDS) {
+    throw new ApiError(429, 'RESEND_TOO_SOON', 'Espera un momento antes de pedir otro código.');
+  }
+
+  await issueEmailVerification(user.id, user.email, req.ip);
+  logAudit(user.id, 'auth.resend_verification', {}, req.ip);
+  res.json({ ok: true, message: 'Enviamos un nuevo código a tu correo.' });
 }));
 
 authRouter.post('/refresh', asyncHandler(async (req, res) => {

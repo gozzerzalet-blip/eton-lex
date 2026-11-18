@@ -87,6 +87,7 @@ async function main() {
     const tokenA = registerA.data.accessToken;
     const userA = registerA.data.user;
     assert.ok(tokenA && userA.id);
+    assert.equal(typeof registerA.data.requiresEmailVerification, 'boolean');
     const registerB = await request('/api/auth/register', {
         method: 'POST',
         body: { name: 'E2E Rafael', email: `e2e.rafael.${stamp}@etonlex.test`, password: PASSWORD, university: 'UNMSM', universityType: 'publica' },
@@ -249,6 +250,32 @@ async function main() {
     assert.equal(capabilities.status, 200);
     const emailReady = capabilities.data.email?.configured === true;
     const recoveryEmail = `e2e.andrea.${stamp}@etonlex.test`;
+    // ── Verificación de registro e ingreso por código ────────────
+    if (emailReady) {
+        const badCode = await request('/api/auth/login-with-code', {
+            method: 'POST',
+            body: { email: recoveryEmail, code: '000000' },
+        });
+        assert.equal(badCode.status, 400);
+        ok('ingreso por código rechaza códigos inventados');
+        const meVerified = await request('/api/auth/me', { token: tokenA });
+        assert.equal(typeof meVerified.data.user.emailVerified, 'boolean');
+        ok('el perfil informa si el correo está verificado');
+    }
+    else {
+        const loginCodeUnavailable = await request('/api/auth/request-login-code', {
+            method: 'POST',
+            body: { email: recoveryEmail },
+        });
+        assert.equal(loginCodeUnavailable.status, 503);
+        const verifyUnavailable = await request('/api/auth/verify-email', {
+            method: 'POST',
+            token: tokenA,
+            body: { code: '000000' },
+        });
+        assert.equal(verifyUnavailable.status, 503);
+        ok('verificación e ingreso por código suspendidos hasta configurar SMTP');
+    }
     if (emailReady) {
         const unknown = await request('/api/auth/forgot-password', {
             method: 'POST',

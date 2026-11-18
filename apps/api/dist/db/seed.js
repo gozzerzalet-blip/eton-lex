@@ -1,3 +1,6 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import bcrypt from 'bcryptjs';
 import { db, migrate, now, uuid } from './index.js';
 import { config } from '../config.js';
@@ -151,6 +154,22 @@ function main() {
     upsertNorms();
     if (config.seedAdmin.email && config.seedAdmin.password) {
         createUser(config.seedAdmin.email, config.seedAdmin.password, config.seedAdmin.name, 'admin', { verified: true });
+        // Si la contraseña sensible del administrador se reemplazó en el panel,
+        // se aplica una sola vez al reiniciar. Después, la contraseña la controla
+        // el propio usuario desde la página.
+        const marker = path.join(config.paths.data, '.admin-password-applied');
+        const desired = crypto.createHash('sha256').update(config.seedAdmin.password).digest('hex');
+        const applied = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim() : '';
+        if (applied !== desired) {
+            const admin = db.prepare('SELECT id, password_hash FROM users WHERE email = ?')
+                .get(config.seedAdmin.email);
+            if (admin && !bcrypt.compareSync(config.seedAdmin.password, admin.password_hash)) {
+                db.prepare("UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?")
+                    .run(bcrypt.hashSync(config.seedAdmin.password, 10), admin.id);
+                console.log('  · Contraseña del administrador actualizada desde SEED_ADMIN_PASSWORD.');
+            }
+            fs.writeFileSync(marker, desired);
+        }
         console.log(`  · Administrador: ${config.seedAdmin.email}`);
     }
     else {

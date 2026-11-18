@@ -70,6 +70,36 @@ CREATE TABLE IF NOT EXISTS password_resets (
 CREATE INDEX IF NOT EXISTS idx_password_resets_email ON password_resets(email, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets(user_id, consumed_at);
 
+-- Códigos de un solo uso para confirmar el correo al crear una cuenta.
+-- Igual que en recuperación: solo se guarda el hash, nunca el código en texto.
+CREATE TABLE IF NOT EXISTS email_verifications (
+  id           TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  email        TEXT NOT NULL,
+  code_hash    TEXT NOT NULL,
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  expires_at   TEXT NOT NULL,
+  consumed_at  TEXT,
+  requested_ip TEXT,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_email_verifications_user ON email_verifications(user_id, created_at DESC);
+
+-- Códigos para iniciar sesión sin contraseña. Sirven para cualquier cuenta,
+-- incluso cuando la persona olvidó su contraseña. Solo se guarda el hash.
+CREATE TABLE IF NOT EXISTS login_codes (
+  id           TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  email        TEXT NOT NULL,
+  code_hash    TEXT NOT NULL,
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  expires_at   TEXT NOT NULL,
+  consumed_at  TEXT,
+  requested_ip TEXT,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_login_codes_email ON login_codes(email, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS legal_areas (
   slug        TEXT PRIMARY KEY,
   name        TEXT NOT NULL,

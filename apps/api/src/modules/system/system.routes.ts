@@ -29,9 +29,11 @@ systemRouter.get('/capabilities', (_req, res) => {
     email: {
       configured: config.smtp.configured,
       note: config.smtp.configured
-        ? 'Recuperación de contraseña por código disponible para cualquier cuenta registrada.'
-        : 'Sin SMTP: la recuperación de contraseña por código no está disponible.',
+        ? 'Códigos reales para verificar el registro, ingresar sin contraseña y recuperar el acceso.'
+        : 'Sin SMTP: no hay verificación, ingreso por código ni recuperación por correo.',
       passwordReset: config.smtp.configured,
+      emailVerification: config.smtp.configured,
+      loginCode: config.smtp.configured,
     },
     webrtc: {
       stun: config.webrtc.stun,

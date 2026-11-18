@@ -84,6 +84,34 @@ export function createApp() {
         legacyHeaders: false,
         message: { error: { code: 'RATE_LIMIT', message: 'Demasiados intentos con el código. Espera 15 minutos.' } },
     }));
+    app.use('/api/auth/verify-email', rateLimit({
+        windowMs: 15 * 60 * 1000,
+        limit: 10,
+        standardHeaders: 'draft-7',
+        legacyHeaders: false,
+        message: { error: { code: 'RATE_LIMIT', message: 'Demasiados intentos con el código. Espera 15 minutos.' } },
+    }));
+    app.use('/api/auth/resend-verification', rateLimit({
+        windowMs: 60 * 60 * 1000,
+        limit: 5,
+        standardHeaders: 'draft-7',
+        legacyHeaders: false,
+        message: { error: { code: 'RATE_LIMIT', message: 'Demasiadas solicitudes de verificación. Espera una hora.' } },
+    }));
+    app.use('/api/auth/request-login-code', rateLimit({
+        windowMs: 60 * 60 * 1000,
+        limit: 5,
+        standardHeaders: 'draft-7',
+        legacyHeaders: false,
+        message: { error: { code: 'RATE_LIMIT', message: 'Demasiados códigos de ingreso. Espera una hora.' } },
+    }));
+    app.use('/api/auth/login-with-code', rateLimit({
+        windowMs: 15 * 60 * 1000,
+        limit: 10,
+        standardHeaders: 'draft-7',
+        legacyHeaders: false,
+        message: { error: { code: 'RATE_LIMIT', message: 'Demasiados intentos con el código. Espera 15 minutos.' } },
+    }));
     app.use('/api/ai', rateLimit({
         windowMs: 60 * 1000,
         limit: 40,

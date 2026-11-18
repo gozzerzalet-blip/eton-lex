@@ -134,6 +134,9 @@ export default function Profile() {
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [uploadingCover, setUploadingCover] = useState(false);
   const [uploadingDocs, setUploadingDocs] = useState(false);
+  const [emailCode, setEmailCode] = useState('');
+  const [emailNotice, setEmailNotice] = useState('');
+  const [emailError, setEmailError] = useState('');
   const [form, setForm] = useState<ProfileForm>(() => makeForm(user));
 
   const profileQuery = useQuery({
@@ -320,6 +323,39 @@ export default function Profile() {
     }
   };
 
+  const verifyOwnEmail = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setEmailError('');
+    setEmailNotice('');
+    try {
+      const data = await api<{ user: User }>('/auth/verify-email', {
+        method: 'POST',
+        body: JSON.stringify({ code: emailCode }),
+      });
+      setUser(data.user);
+      setEmailCode('');
+      setEmailNotice('Correo verificado correctamente.');
+      toast.success('Correo verificado.');
+    } catch (err) {
+      setEmailError(err instanceof ApiClientError ? err.message : 'No se pudo verificar el correo.');
+    }
+  };
+
+  const resendOwnEmail = async () => {
+    setEmailError('');
+    setEmailNotice('');
+    try {
+      const data = await api<{ message: string }>('/auth/resend-verification', {
+        method: 'POST',
+        body: '{}',
+      });
+      setEmailNotice(data.message ?? 'Enviamos un nuevo código a tu correo.');
+      setEmailCode('');
+    } catch (err) {
+      setEmailError(err instanceof ApiClientError ? err.message : 'No se pudo reenviar el código.');
+    }
+  };
+
   const uploadDocuments = async (files: FileList) => {
     setUploadingDocs(true);
     try {
@@ -382,8 +418,35 @@ export default function Profile() {
         eyebrow={isOwn ? 'Mi perfil' : 'Perfil de estudiante'}
         title={isOwn ? 'Tu identidad académica' : displayed.name}
         description={isOwn ? 'Tus datos académicos, documentos y normas seguidas. Puedes controlar qué comparte la comunidad desde Configuración.' : undefined}
-        action={isOwn ? <Badge tone="gold"><ShieldCheck size={10} /> Cuenta verificada por correo pendiente</Badge> : undefined}
+        action={isOwn ? <Badge tone="gold"><ShieldCheck size={10} /> {displayed?.emailVerified ? 'Correo verificado' : 'Correo por verificar'}</Badge> : undefined}
       />
+
+      {isOwn && displayed && !displayed.emailVerified && (
+        <section className="card p-4 sm:p-5">
+          <p className="text-[12px] font-medium text-fg/85">Confirma tu correo</p>
+          <p className="mt-1 text-[11px] leading-relaxed text-fg/40">
+            Enviamos un código de 6 dígitos a {displayed.email ?? 'tu correo'}. También sirve para recuperar el acceso si olvidas tu contraseña.
+          </p>
+          <form onSubmit={verifyOwnEmail} className="mt-3 flex flex-wrap gap-2">
+            <input
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={6}
+              required
+              value={emailCode}
+              onChange={(event) => setEmailCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+              className="input max-w-[180px] text-center tracking-[0.3em]"
+              placeholder="000000"
+              aria-label="Código de verificación"
+            />
+            <button type="submit" className="btn btn-sm btn-primary">Verificar</button>
+            <button type="button" onClick={resendOwnEmail} className="btn btn-sm">Reenviar código</button>
+          </form>
+          {emailError && <p className="mt-2 text-[11px] text-fg/60">{emailError}</p>}
+          {emailNotice && <p className="mt-2 text-[11px] text-fg/60">{emailNotice}</p>}
+        </section>
+      )}
 
       <header className="card relative overflow-hidden">
         <div className="relative h-28 overflow-hidden bg-[linear-gradient(118deg,#fafafa_0%,#ececef_46%,#f6f6f8_100%)] sm:h-32 dark:bg-[linear-gradient(118deg,rgba(255,255,255,.09),rgba(255,255,255,.03)_46%,rgba(255,255,255,.06))]">

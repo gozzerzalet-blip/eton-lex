@@ -60,6 +60,7 @@ export function migrate() {
         ['public_id', 'TEXT'],
         ["links", "TEXT NOT NULL DEFAULT '[]'"],
         ["privacy_fields", "TEXT NOT NULL DEFAULT '{}'"],
+        ['email_verified', 'INTEGER NOT NULL DEFAULT 0'],
     ];
     for (const [name, ddl] of userAdditions) {
         if (!userColumns.has(name))

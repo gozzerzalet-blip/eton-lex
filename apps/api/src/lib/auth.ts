@@ -184,7 +184,7 @@ export function publicUser(userId: string, includePrivate = false, viewerId?: st
   const row = db.prepare(`
     SELECT id, name, email, avatar_url, cover_url, username, public_id, university, university_id, campus_id,
            university_type, faculty, career, country, city, cycle, bio, links, privacy_fields,
-           role, created_at, last_seen_at, theme, privacy, onboarded
+           role, created_at, last_seen_at, theme, privacy, onboarded, email_verified
     FROM users WHERE id = ?
   `).get(userId) as any;
   if (!row) return null;
@@ -234,6 +234,7 @@ export function publicUser(userId: string, includePrivate = false, viewerId?: st
           privacy,
           privacyFields: fields,
           onboarded: Boolean(row.onboarded),
+          emailVerified: Boolean(row.email_verified),
         }
       : {}),
   };

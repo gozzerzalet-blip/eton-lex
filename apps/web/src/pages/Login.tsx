@@ -1,14 +1,14 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ArrowLeft, ArrowRight, Eye, EyeOff, Lock, Mail, ShieldCheck, Sparkles } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Eye, EyeOff, KeyRound, Lock, Mail, ShieldCheck, Sparkles } from 'lucide-react';
 import { api, ApiClientError } from '../lib/api';
 import { useAuth } from '../lib/store';
 import { Logo } from '../components/Logo';
 import { Spinner } from '../components/ui';
 import type { User } from '../lib/types';
 
-type Mode = 'login' | 'forgot' | 'reset';
+type Mode = 'login' | 'forgot' | 'reset' | 'code-request' | 'code-login';
 
 const COPY: Record<Mode, { eyebrow: string; title: string; description: string }> = {
   login: {
@@ -26,6 +26,16 @@ const COPY: Record<Mode, { eyebrow: string; title: string; description: string }
     title: 'Revisa tu correo',
     description: 'Ingresa el código que recibiste y elige una nueva contraseña.',
   },
+  'code-request': {
+    eyebrow: 'Acceso sin contraseña',
+    title: 'Ingresa con un código',
+    description: 'Te enviaremos un código de 6 dígitos al correo con el que te registraste.',
+  },
+  'code-login': {
+    eyebrow: 'Verificación por correo',
+    title: 'Revisa tu correo',
+    description: 'Escribe el código de 6 dígitos que recibiste para entrar a tu cuenta.',
+  },
 };
 
 export default function Login() {
@@ -34,6 +44,7 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [show, setShow] = useState(false);
   const [recoveryEmail, setRecoveryEmail] = useState('');
+  const [codeEmail, setCodeEmail] = useState('');
   const [code, setCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -61,6 +72,44 @@ export default function Login() {
       const data = await api<{ accessToken: string; user: User }>('/auth/login', {
         method: 'POST',
         body: JSON.stringify({ email, password }),
+      });
+      setSession(data.user, data.accessToken);
+      navigate('/');
+    } catch (err) {
+      setError(message(err, 'No se pudo iniciar sesión.'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const requestLoginCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setNotice('');
+    setLoading(true);
+    try {
+      const data = await api<{ message: string }>('/auth/request-login-code', {
+        method: 'POST',
+        body: JSON.stringify({ email: codeEmail }),
+      });
+      goTo('code-login');
+      setNotice(data.message ?? 'Si el correo está registrado, enviamos un código.');
+    } catch (err) {
+      setError(message(err, 'No se pudo enviar el código.'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitCodeLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setNotice('');
+    setLoading(true);
+    try {
+      const data = await api<{ accessToken: string; user: User }>('/auth/login-with-code', {
+        method: 'POST',
+        body: JSON.stringify({ email: codeEmail, code }),
       });
       setSession(data.user, data.accessToken);
       navigate('/');
@@ -199,6 +248,71 @@ export default function Login() {
 
                 <button type="submit" disabled={loading} className="btn btn-primary w-full">
                   {loading ? <Spinner size={15} className="border-paper/30 border-t-paper" /> : <>Ingresar <ArrowRight size={15} /></>}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setCodeEmail(email); goTo('code-request'); }}
+                  className="flex w-full items-center justify-center gap-1.5 text-[12px] font-medium text-fg/45 transition-colors hover:text-fg/75"
+                >
+                  <KeyRound size={13} /> Ingresar con código en mi correo
+                </button>
+              </form>
+            )}
+
+            {mode === 'code-request' && (
+              <form onSubmit={requestLoginCode} className="mt-7 space-y-4">
+                <div>
+                  <label className="label" htmlFor="code-email">Correo de tu cuenta</label>
+                  <div className="relative">
+                    <Mail size={15} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-fg/30" />
+                    <input id="code-email" type="email" autoComplete="email" required value={codeEmail} onChange={(e) => setCodeEmail(e.target.value)} className="input pl-10" placeholder="tu.correo@gmail.com" />
+                  </div>
+                  <p className="mt-2 text-[11px] leading-relaxed text-fg/35">
+                    Sirve para cualquier cuenta registrada, aunque hayas olvidado tu contraseña.
+                  </p>
+                </div>
+
+                <button type="submit" disabled={loading} className="btn btn-primary w-full">
+                  {loading ? <Spinner size={15} className="border-paper/30 border-t-paper" /> : <>Enviar código <ArrowRight size={15} /></>}
+                </button>
+                <button type="button" onClick={() => goTo('login')} className="flex w-full items-center justify-center gap-1.5 text-[12px] text-fg/40 transition-colors hover:text-fg/70">
+                  <ArrowLeft size={13} /> Volver a ingresar
+                </button>
+              </form>
+            )}
+
+            {mode === 'code-login' && (
+              <form onSubmit={submitCodeLogin} className="mt-7 space-y-4">
+                <div>
+                  <label className="label" htmlFor="login-code-email">Correo de tu cuenta</label>
+                  <div className="relative">
+                    <Mail size={15} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-fg/30" />
+                    <input id="login-code-email" type="email" autoComplete="email" required value={codeEmail} onChange={(e) => setCodeEmail(e.target.value)} className="input pl-10" placeholder="tu.correo@gmail.com" />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="label" htmlFor="login-code">Código de 6 dígitos</label>
+                  <input
+                    id="login-code"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    pattern="[0-9]{6}"
+                    required
+                    value={code}
+                    onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    className="input text-center text-[17px] tracking-[0.4em]"
+                    placeholder="000000"
+                  />
+                </div>
+
+                <button type="submit" disabled={loading} className="btn btn-primary w-full">
+                  {loading ? <Spinner size={15} className="border-paper/30 border-t-paper" /> : <>Ingresar <ArrowRight size={15} /></>}
+                </button>
+                <button type="button" onClick={() => goTo('code-request')} className="flex w-full items-center justify-center gap-1.5 text-[12px] text-fg/40 transition-colors hover:text-fg/70">
+                  <ArrowLeft size={13} /> Pedir otro código
                 </button>
               </form>
             )}

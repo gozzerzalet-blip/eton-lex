@@ -158,20 +158,35 @@ Verificación ejecutada contra la URL pública:
   27 normas, 22 verificadas, 7,433 artículos y 1,412 versiones históricas. Se importa una sola
   vez, cuando la biblioteca está vacía; nunca sobrescribe datos creados después.
 
-## Recuperación de contraseña por código
+## Correos reales: verificación, ingreso y recuperación
 
-Con las variables `SMTP_*` anteriores, cualquier persona registrada puede hacer clic en
-**¿Olvidaste tu contraseña?** desde `/login`, escribir el correo con el que se registró y recibir
-un código de 6 dígitos en ese buzón. El código se guarda solo como hash, vence en 15 minutos,
-permite 5 intentos y se invalida al usarse. Después se elige una nueva contraseña y se cierran las
-sesiones anteriores.
+Con las variables `SMTP_*` anteriores, ETON LEX puede enviar códigos reales a **cualquier correo
+registrado** (no solo al del administrador):
 
-El remitente debe ser la misma cuenta de Gmail autenticada (`SMTP_USER`), porque Gmail rechaza
-remitentes distintos. Los destinatarios pueden ser cualquier correo, no solo Gmail.
+- **Registro:** al crear la cuenta se envía un código de 6 dígitos; el paso 03 de `/registro`
+  permite confirmarlo. Después se puede reenviar desde `/perfil`.
+- **Ingreso sin contraseña:** desde `/login`, **Ingresar con código en mi correo** envía un código
+  a cualquier cuenta, aunque la persona haya olvidado su contraseña. El código vale 10 minutos,
+  permite 5 intentos y se invalida al usarse.
+- **Recuperación de contraseña:** **¿Olvidaste tu contraseña?** envía un código de 6 dígitos,
+  vence en 15 minutos, permite 5 intentos y cierra las sesiones anteriores al cambiar la clave.
+
+Los códigos se guardan solo como hash bcrypt, nunca se muestran en la página ni se devuelven en la
+respuesta. El remitente debe ser la misma cuenta de Gmail autenticada (`SMTP_USER`), porque Gmail
+rechaza remitentes distintos. Los destinatarios pueden ser cualquier correo, no solo Gmail.
 
 Si `SMTP_PASS` no está configurado, `/api/system/capabilities` reporta
-`email.configured: false` y la opción responde claramente que el correo aún no está disponible:
-nunca se simula un envío ni se muestra el código en pantalla.
+`email.configured: false`, `email.passwordReset: false`, `email.emailVerification: false` y
+`email.loginCode: false`. Los formularios responden **503** con un mensaje honesto: nunca se simula
+un envío ni se muestra el código en pantalla.
+
+### Acceso inmediato del administrador
+
+Si se olvidó `SEED_ADMIN_PASSWORD` y no hay correo configurado, se puede reemplazar el valor en
+**Variables** (Suga lo trata como sensible: se puede cambiar, no ver). En el siguiente reinicio,
+`seed.ts` aplica la contraseña nueva **una sola vez** al administrador y escribe un marcador con el
+hash del valor aplicado en `/data/.admin-password-applied`. Después, la contraseña la administra la
+propia cuenta desde la página. Cambiar la variable otra vez vuelve a aplicarla una vez.
 
 Actualizar la página web cuando haya cambios:
 
@@ -187,10 +202,9 @@ en el environment.
 - 1 GB de almacenaje compartido entre base de datos, uploads y backups. Por eso
   `MAX_UPLOAD_MB=10`.
 - 5 Mbit/s de salida: las descargas grandes son lentas.
-- El plan Free no incluye dominio propio ni correo SMTP. La recuperación por código depende de
-  las variables `SMTP_*` (Gmail con contraseña de aplicación); sin ellas no se activa.
-- La verificación de correo al registrarse sigue pendiente: es un flujo distinto de la
-  recuperación por código.
+- El plan Free no incluye dominio propio ni correo SMTP. La verificación, el ingreso por código
+  y la recuperación dependen de las variables `SMTP_*` (Gmail con contraseña de aplicación);
+  sin ellas no se activan.
 - TURN no está configurado; las llamadas funcionan P2P y pueden fallar en NAT estricto.
 - Un solo replica porque SQLite vive en el volumen.
 - Los backups están dentro del mismo volumen: protegen contra borrados accidentales, no contra
