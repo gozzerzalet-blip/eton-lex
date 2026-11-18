@@ -24,6 +24,27 @@ const int = (v: string | undefined, fallback: number) => {
 // punto de acceso comunitario sin registro (Pollinations).
 const NO_KEY_PROVIDERS = new Set(['ollama', 'pollinations']);
 
+/**
+ * Fuentes públicas predeterminadas de ETON NEWS. No requieren clave ni pago y
+ * cubren cambios legales, derechos humanos, criminalidad, cultura y actualidad
+ * mundial. `NEWS_FEEDS` las reemplaza por completo cuando se define.
+ */
+const DEFAULT_NEWS_FEEDS = [
+  'https://iuslatin.pe/feed/|nacional|Actualidad jurídica|IUSLatin.pe',
+  'https://eur-lex.europa.eu/EN/display-feed.rss?rssId=165|internacional|Nuevas leyes y derogaciones|EUR-Lex DO L',
+  'https://eur-lex.europa.eu/EN/display-feed.rss?rssId=162|internacional|Legislación UE|EUR-Lex Legislación',
+  'https://ec.europa.eu/commission/presscorner/api/rss?language=en&latestnews|internacional|Políticas y justicia UE|Comisión Europea',
+  'https://news.un.org/feed/subscribe/en/news/all/rss.xml|internacional|Derecho internacional|UN News',
+  'https://www.ohchr.org/en/rss.xml|internacional|Derechos humanos|OHCHR',
+  'https://www.icc-cpi.int/rss/news/all|internacional|Crímenes internacionales|Corte Penal Internacional',
+  'https://www.europol.europa.eu/rss.xml|internacional|Criminalidad|Europol',
+  'https://whc.unesco.org/en/news/rss/|internacional|Cultura y patrimonio|UNESCO Patrimonio Mundial',
+  'https://ich.unesco.org/cron_rss.php?flux-rss=news&lang=en|internacional|Cultura viva|UNESCO Patrimonio Inmaterial',
+  'https://hudoc.echr.coe.int/app/transform/rss?library=echrengpress&query=contentsitename%3AECHR%20AND%20doctype%3DPR&sort=kpdate%20Descending&start=0&length=20&rankingModelId=11111111-0000-0000-0000-000000000000|internacional|Jurisprudencia|TEDH',
+  'https://feeds.bbci.co.uk/news/world/rss.xml|internacional|Actualidad mundial|BBC World',
+  'https://rss.nytimes.com/services/xml/rss/nyt/World.xml|internacional|Actualidad mundial|The New York Times',
+];
+
 const dataDir = process.env.DATA_DIR ?? path.join(apiRoot, 'data');
 
 export const config = {
@@ -101,10 +122,11 @@ export const config = {
   },
 
   news: {
-    feeds: (process.env.NEWS_FEEDS ?? '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
+    feeds: (() => {
+      const raw = process.env.NEWS_FEEDS;
+      if (raw === undefined || raw.trim() === '') return DEFAULT_NEWS_FEEDS;
+      return raw.split(',').map((s) => s.trim()).filter(Boolean);
+    })(),
     newsApiKey: process.env.NEWSAPI_KEY ?? '',
   },
 
