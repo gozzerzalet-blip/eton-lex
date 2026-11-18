@@ -227,6 +227,39 @@ function unverifiedQuotes(answer: string, blocks: RetrievedBlock[]): string[] {
   return bad;
 }
 
+/** Números de ley citados que no aparecen en ninguna fuente del contexto. */
+function unverifiedLawRefs(answer: string, blocks: RetrievedBlock[]): string[] {
+  const corpus = blocks.map((b) => `${b.label} ${b.meta} ${b.text}`).join(' ');
+  const known = new Set(
+    [...corpus.matchAll(/\bley\s*(?:n[°º.]?\s*)?(\d{2,5})\b/gi)].map((m) => m[1]),
+  );
+  const cited = new Set(
+    [...answer.matchAll(/\bley\s*(?:n[°º.]?\s*)?(\d{2,5})\b/gi)].map((m) => m[1]),
+  );
+  return [...cited].filter((n) => !known.has(n)).sort((a, b) => Number(a) - Number(b));
+}
+
+/** Figuras ajenas al ordenamiento peruano que el modelo suele inventar. */
+function unverifiedForeignTerms(answer: string, blocks: RetrievedBlock[]): string[] {
+  const corpus = foldText(blocks.map((b) => `${b.label} ${b.meta} ${b.text}`).join(' '));
+  const terms = ['Corte Constitucional', 'acción de tutela', 'Ley 31307'];
+  return terms.filter((t) => new RegExp(`\\b${t.replace(/ /g, '\\s+')}\\b`, 'i').test(answer)
+    && !corpus.includes(foldText(t)));
+}
+
+/**
+ * Una sección de fuentes sin marcadores [F#] en el cuerpo es una lista suelta
+ * de enlaces: no permite saber qué afirmación respalda cada fuente. Se retira
+ * y se sustituye por una advertencia explícita.
+ */
+function stripUnlinkedSources(answer: string): string {
+  if (/\[F\d+\]/.test(answer)) return answer;
+  const header = /(?:^|\n)[ \t]*(?:#{1,6}\s*)?\*{0,2}(?:Fuentes(?: consultadas| externas| consultadas externas)?|Bibliografía|Referencias)\*{0,2}\s*:?[ \t]*(?:\n|$)/i;
+  if (!header.test(answer)) return answer;
+  const note = '\n\n> ⚠️ **Fuentes no vinculadas:** se retiró la lista de fuentes porque el cuerpo de la respuesta no usa marcadores [F#]. Las fuentes se muestran en el panel de la conversación, pero no se ha podido asociar cada una con una afirmación concreta.';
+  return `${answer.replace(header, '\n')}${note}`;
+}
+
 aiRouter.get('/status', asyncHandler(async (_req, res) => {
   res.json({
     ...providerInfo(),
@@ -522,21 +555,44 @@ aiRouter.post('/conversations/:id/messages', asyncHandler(async (req, res) => {
       send('delta', { text: delta });
     }
 
-    // Control de veracidad: si el modelo citó artículos o frases textuales que
-    // no están en el contexto, se advierte en la propia respuesta (no se oculta).
-    const unsupported = unverifiedArticleRefs(full, allBlocks);
+    // Control de veracidad: se evalúa únicamente el texto generado por el
+    // modelo, antes de añadir advertencias, para que un aviso no dispare otro.
+    const modelAnswer = full;
+    const unsupported = unverifiedArticleRefs(modelAnswer, allBlocks);
     if (unsupported.length > 0) {
       const note = `\n\n---\n\n> ⚠️ **Verificación automática:** esta respuesta menciona el artículo ${unsupported.join(', artículo ')} sin que ese texto conste en las fuentes consultadas. Confírmalo en el diario oficial o en el SPIJ antes de usarlo.`;
       full += note;
       send('delta', { text: note });
     }
 
-    const fakeQuotes = unverifiedQuotes(full, allBlocks);
+    const fakeQuotes = unverifiedQuotes(modelAnswer, allBlocks);
     if (fakeQuotes.length > 0) {
       const list = fakeQuotes.map((q) => `«${q}»`).join('; ');
       const note = `\n\n> ⚠️ **Cita textual no verificada:** ${list} no aparece literalmente en las fuentes consultadas. Puede ser una paráfrasis del modelo: no la uses como texto legal.`;
       full += note;
       send('delta', { text: note });
+    }
+
+    const inventedLaws = unverifiedLawRefs(modelAnswer, allBlocks);
+    if (inventedLaws.length > 0) {
+      const note = `\n\n> ⚠️ **Norma no verificada:** se menciona(n) la(s) Ley ${inventedLaws.join(', Ley ')} sin que aparezca(n) en las fuentes consultadas. No des por verificada esa referencia.`;
+      full += note;
+      send('delta', { text: note });
+    }
+
+    const foreignTerms = unverifiedForeignTerms(modelAnswer, allBlocks);
+    if (foreignTerms.length > 0) {
+      const note = `\n\n> ⚠️ **Figura ajena al contexto:** ${foreignTerms.join(', ')} no consta en las fuentes peruanas recuperadas. En Perú corresponde verificar el Tribunal Constitucional y las normas peruanas vigentes.`;
+      full += note;
+      send('delta', { text: note });
+    }
+
+    // Si el modelo listó fuentes sin marcar ninguna afirmación con [F#], se
+    // retira esa lista del texto final y se explica por qué en la respuesta.
+    const corrected = stripUnlinkedSources(full);
+    if (corrected !== full) {
+      full = corrected;
+      send('delta', { text: '\n\n> ⚠️ Se retiró la sección de fuentes porque el cuerpo no vinculó ninguna afirmación con marcadores [F#].' });
     }
 
     const assistantId = uuid();

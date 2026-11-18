@@ -138,7 +138,16 @@ export function expandFollowUp(text: string, history: Array<{ role: string; cont
   if (!previous) return text;
   const base = previous.content.replace(/\s+/g, ' ').trim();
   const current = text.replace(/\s+/g, ' ').trim();
-  return `${base.slice(0, 500)} — ${current}`.trim();
+  // Si la respuesta anterior citó artículos o leyes, se arrastran como texto
+  // de búsqueda: «¿Y si…?» suele referirse justo a esa norma sin repetirla.
+  const previousAnswer = [...history].reverse().find((m) => m.role === 'assistant' && m.content.trim());
+  const source = previousAnswer?.content ?? '';
+  const refs = [
+    ...[...source.matchAll(/\bart(?:[íi]culo|\.)\s*(\d{1,4})/gi)].map((m) => `artículo ${m[1]}`),
+    ...[...source.matchAll(/\bley\s*(?:n[°º.]?\s*)?(\d{2,5})/gi)].map((m) => `Ley ${m[1]}`),
+  ];
+  const unique = [...new Set(refs)].slice(0, 8).join(' ');
+  return `${base.slice(0, 500)}${unique ? ` — ${unique}` : ''} — ${current}`.trim();
 }
 
 function hasAny(re: RegExp, text: string): boolean {
