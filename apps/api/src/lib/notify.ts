@@ -27,6 +27,11 @@ export function emitToRoom(roomId: string, event: string, payload: unknown) {
   io?.to(`room:${roomId}`).emit(event, payload);
 }
 
+/** Aviso global (por ejemplo, noticias nuevas) a todas las sesiones abiertas. */
+export function broadcast(event: string, payload: unknown) {
+  io?.emit(event, payload);
+}
+
 export function notify(
   userId: string,
   type: string,
