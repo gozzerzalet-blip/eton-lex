@@ -17,8 +17,8 @@ type FriendsResponse = {
   outgoing: Array<{ request_id: string; id: string; name: string; avatar_url?: string; university?: string; created_at: string }>;
 };
 
-type StudentsResponse = {
-  users: Array<{ id: string; name: string; avatarUrl?: string; university?: string; universityType?: string; city?: string; cycle?: string; bio?: string; relation: string | null }>;
+type StudentLookup = {
+  user: { id: string; name: string; avatarUrl?: string; university?: string; cycle?: string; relation: string | null } | null;
 };
 
 type GroupsResponse = {
@@ -38,9 +38,9 @@ export default function Community() {
   const feedQuery = useQuery({ queryKey: ['community-feed'], queryFn: () => api<{ posts: Post[] }>('/community/feed') });
   const friendsQuery = useQuery({ queryKey: ['friends'], queryFn: () => api<FriendsResponse>('/community/friends') });
   const studentsQuery = useQuery({
-    queryKey: ['students', search],
-    queryFn: () => api<StudentsResponse>(`/users?q=${encodeURIComponent(search)}`),
-    enabled: tab === 'friends',
+    queryKey: ['student-lookup', search.trim()],
+    queryFn: () => api<StudentLookup>(`/users/lookup?q=${encodeURIComponent(search.trim())}`),
+    enabled: tab === 'friends' && search.trim().length >= 4,
   });
   const groupsQuery = useQuery({ queryKey: ['groups'], queryFn: () => api<GroupsResponse>('/community/groups'), enabled: tab === 'groups' });
 
@@ -66,7 +66,7 @@ export default function Community() {
     mutationFn: (userId: string) => api('/community/friends/request', { method: 'POST', body: JSON.stringify({ userId }) }),
     onSuccess: () => {
       toast.success('Solicitud enviada.');
-      queryClient.invalidateQueries({ queryKey: ['students'] });
+      queryClient.invalidateQueries({ queryKey: ['student-lookup'] });
       queryClient.invalidateQueries({ queryKey: ['friends'] });
     },
     onError: (err) => toast.error(err instanceof ApiClientError ? err.message : 'No se pudo enviar la solicitud.'),
@@ -77,7 +77,7 @@ export default function Community() {
       api(`/community/friends/${id}/respond`, { method: 'POST', body: JSON.stringify({ action }) }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['friends'] });
-      queryClient.invalidateQueries({ queryKey: ['students'] });
+      queryClient.invalidateQueries({ queryKey: ['student-lookup'] });
       queryClient.invalidateQueries({ queryKey: ['community-feed'] });
     },
   });
@@ -87,7 +87,7 @@ export default function Community() {
     onSuccess: () => {
       toast.success('Amistad eliminada.');
       queryClient.invalidateQueries({ queryKey: ['friends'] });
-      queryClient.invalidateQueries({ queryKey: ['students'] });
+      queryClient.invalidateQueries({ queryKey: ['student-lookup'] });
     },
   });
 
@@ -255,29 +255,30 @@ export default function Community() {
             </div>
             <div className="relative mt-3">
               <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg/25" />
-              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Nombre, universidad o correo…" className="input !py-2 !text-[12px] pl-9" />
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ID público, usuario o correo exacto…" className="input !py-2 !text-[12px] pl-9" />
+              <p className="mt-2 text-[10px] text-fg/30">Por privacidad solo mostramos resultados de búsqueda exacta; no hay listado general de estudiantes.</p>
             </div>
 
             <div className="mt-3 space-y-1.5">
-              {studentsQuery.isLoading && [0, 1, 2].map((i) => <Skeleton key={i} className="h-14 w-full" />)}
-              {studentsQuery.data?.users.map((s) => (
-                <div key={s.id} className="flex items-center gap-2.5 rounded-xl border border-line px-2.5 py-2">
-                  <Avatar name={s.name} url={s.avatarUrl} size={32} />
+              {studentsQuery.isLoading && <Skeleton className="h-14 w-full" />}
+              {studentsQuery.data?.user && (
+                <div className="flex items-center gap-2.5 rounded-xl border border-line px-2.5 py-2">
+                  <Avatar name={studentsQuery.data.user.name} url={studentsQuery.data.user.avatarUrl} size={32} />
                   <div className="min-w-0 flex-1">
-                    <Link to={`/perfil/${s.id}`} className="block truncate text-[12.5px] text-fg/80 hover:underline">{s.name}</Link>
-                    <p className="truncate text-[10px] text-fg/30">{[s.university, s.cycle, s.city].filter(Boolean).join(' · ') || 'Sin datos académicos'}</p>
+                    <Link to={`/perfil/${studentsQuery.data.user.id}`} className="block truncate text-[12.5px] text-fg/80 hover:underline">{studentsQuery.data.user.name}</Link>
+                    <p className="truncate text-[10px] text-fg/30">{[studentsQuery.data.user.university, studentsQuery.data.user.cycle].filter(Boolean).join(' · ') || 'Sin datos académicos'}</p>
                   </div>
-                  {s.relation === 'accepted' ? (
-                    <button onClick={() => startChat(s.id)} className="btn btn-sm !px-2"><MessageSquare size={12} /></button>
-                  ) : s.relation === 'pending' ? (
+                  {studentsQuery.data.user.relation === 'accepted' ? (
+                    <button onClick={() => startChat(studentsQuery.data.user!.id)} className="btn btn-sm !px-2"><MessageSquare size={12} /></button>
+                  ) : studentsQuery.data.user.relation === 'pending' ? (
                     <Badge>Pendiente</Badge>
                   ) : (
-                    <button onClick={() => request.mutate(s.id)} className="btn btn-sm !px-2" title="Agregar amigo"><UserPlus size={13} /></button>
+                    <button onClick={() => request.mutate(studentsQuery.data.user!.id)} className="btn btn-sm !px-2" title="Agregar amigo"><UserPlus size={13} /></button>
                   )}
                 </div>
-              ))}
-              {!studentsQuery.isLoading && (studentsQuery.data?.users.length ?? 0) === 0 && (
-                <p className="py-6 text-center text-[11.5px] text-fg/30">No encontramos estudiantes con ese criterio.</p>
+              )}
+              {!studentsQuery.isLoading && search.trim().length >= 4 && !studentsQuery.data?.user && (
+                <p className="py-6 text-center text-[11.5px] text-fg/30">No encontramos una cuenta con ese identificador exacto.</p>
               )}
             </div>
           </section>

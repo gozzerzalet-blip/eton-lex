@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Archive, ArrowLeft, BellOff, Camera, CheckCheck, Copy, Download, Eye, FileText, Forward,
-  Image as ImageIcon, Info, Lock, MessageSquare, Mic, MoreHorizontal, Paperclip, Pause, Phone,
+  Image as ImageIcon, Info, Lock, MessageSquare, Mic, MicOff, MoreHorizontal, Paperclip, Pause, Phone,
   PhoneOff, Pin, Play, Search, Send, Smile, Square, Trash2, Video, VideoOff, Volume2, X, Users, Plus,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -53,17 +53,39 @@ function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
   );
 }
 
-function AudioNote({ src, name }: { src: string; name?: string }) {
+function AudioNote({ fileId, name }: { fileId: string; name?: string }) {
   const audioRef = useRef<HTMLAudioElement>(null);
+  const [src, setSrc] = useState<string | null>(null);
+  const [audioError, setAudioError] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
   const [rate, setRate] = useState(1);
 
+  useEffect(() => {
+    let cancelled = false;
+    api<{ token: string; url: string }>(`/files/${fileId}/audio-token`)
+      .then((data) => {
+        if (!cancelled) {
+          setSrc(`${data.url}?token=${encodeURIComponent(data.token)}`);
+          setAudioError(false);
+          audioRef.current?.load();
+        }
+      })
+      .catch(() => { if (!cancelled) setAudioError(true); });
+    return () => { cancelled = true; };
+  }, [fileId]);
+
+  const refreshUrl = () => {
+    api<{ token: string; url: string }>(`/files/${fileId}/audio-token`)
+      .then((data) => { setSrc(`${data.url}?token=${encodeURIComponent(data.token)}`); setAudioError(false); })
+      .catch(() => setAudioError(true));
+  };
+
   const toggle = () => {
     const audio = audioRef.current;
     if (!audio) return;
-    if (audio.paused) void audio.play().catch(() => {});
+    if (audio.paused) void audio.play().catch(() => { if (!src) refreshUrl(); });
     else audio.pause();
   };
 
@@ -84,14 +106,16 @@ function AudioNote({ src, name }: { src: string; name?: string }) {
     <div className="flex w-64 max-w-full items-center gap-1.5 rounded-xl border border-line/70 bg-fg/[.03] px-2 py-1.5 dark:bg-white/[.06]">
       <audio
         ref={audioRef}
-        src={src}
+        src={src ?? undefined}
         preload="metadata"
         onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
         onTimeUpdate={(event) => setCurrent(event.currentTarget.currentTime)}
         onEnded={() => { setPlaying(false); setCurrent(0); }}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
+        onError={() => { setAudioError(true); refreshUrl(); }}
       />
+      {audioError && <span className="text-[9px] text-rose-400">Audio no disponible</span>}
       <button type="button" onClick={toggle} className="rounded-full p-1 text-fg/70 hover:bg-fg/10 hover:text-fg" aria-label={playing ? 'Pausar' : 'Reproducir'}>
         {playing ? <Pause size={13} /> : <Play size={13} />}
       </button>
@@ -109,7 +133,7 @@ function AudioNote({ src, name }: { src: string; name?: string }) {
       <button type="button" onClick={cycleRate} className="shrink-0 rounded-md px-1 py-0.5 text-[9px] font-semibold text-fg/55 hover:bg-fg/10" title="Velocidad de reproducción">
         {rate}x
       </button>
-      <a href={src} download={name ?? 'nota-de-voz.webm'} className="shrink-0 rounded-md p-1 text-fg/45 hover:bg-fg/10 hover:text-fg" title="Descargar nota de voz" aria-label="Descargar nota de voz">
+      <a href={src ?? '#'} onClick={(event) => { if (!src) event.preventDefault(); }} download={name ?? 'nota-de-voz.webm'} className="shrink-0 rounded-md p-1 text-fg/45 hover:bg-fg/10 hover:text-fg" title="Descargar nota de voz" aria-label="Descargar nota de voz">
         <Download size={12} />
       </a>
     </div>
@@ -124,7 +148,14 @@ type ActiveCall = {
   kind: CallKind;
   peerId: string;
   peerName: string;
-  status: 'calling' | 'ringing' | 'active';
+  role: 'caller' | 'callee';
+  status: 'calling' | 'ringing' | 'connecting' | 'active';
+};
+type MediaDevicesInfo = {
+  audioInputs: MediaDeviceInfo[];
+  videoInputs: MediaDeviceInfo[];
+  audioOutputs: MediaDeviceInfo[];
+  canSelectOutput: boolean;
 };
 type IncomingCall = { callId: string; from: { id: string; name: string }; conversationId: string; kind: CallKind };
 
@@ -134,19 +165,69 @@ function useCallController() {
   const [incoming, setIncoming] = useState<IncomingCall | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [remoteAudioLive, setRemoteAudioLive] = useState(false);
+  const [connected, setConnected] = useState(false);
+  const [iceState, setIceState] = useState<string>('new');
   const [muted, setMuted] = useState(false);
   const [cameraOn, setCameraOn] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [iceServers, setIceServers] = useState<RTCIceServer[]>([{ urls: 'stun:stun.l.google.com:19302' }]);
+  const [devices, setDevices] = useState<MediaDevicesInfo>({ audioInputs: [], videoInputs: [], audioOutputs: [], canSelectOutput: false });
+  const [audioInputId, setAudioInputId] = useState('');
+  const [videoInputId, setVideoInputId] = useState('');
+  const [audioOutputId, setAudioOutputId] = useState('');
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localRef = useRef<MediaStream | null>(null);
   const activeRef = useRef<ActiveCall | null>(null);
-  const pendingOfferRef = useRef<{ type: 'offer'; sdp: string } | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const pendingOfferRef = useRef<{ callId: string; description: RTCSessionDescriptionInit } | null>(null);
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const startedAtRef = useRef(0);
+  const negotiatingRef = useRef(false);
+  const iceStateRef = useRef('new');
+  const audioLiveRef = useRef(false);
 
   useEffect(() => { activeRef.current = active; }, [active]);
+  useEffect(() => { iceStateRef.current = iceState; setConnected(iceState === 'connected' || iceState === 'completed' ? audioLiveRef.current : false); }, [iceState]);
+  useEffect(() => { audioLiveRef.current = remoteAudioLive; setConnected((iceStateRef.current === 'connected' || iceStateRef.current === 'completed') && remoteAudioLive); }, [remoteAudioLive]);
+  useEffect(() => {
+    if (connected) setActive((current) => (current && current.status !== 'active' ? { ...current, status: 'active' } : current));
+  }, [connected]);
+  useEffect(() => {
+    const element = active?.kind === 'video' ? remoteVideoRef.current : remoteAudioRef.current;
+    if (!element || !audioOutputId) return;
+    const withSink = element as HTMLMediaElement & { setSinkId?: (id: string) => Promise<void> };
+    if (typeof withSink.setSinkId === 'function') void withSink.setSinkId(audioOutputId).catch(() => {});
+  }, [active?.kind, audioOutputId, remoteStream]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadDevices = async () => {
+      if (!navigator.mediaDevices?.enumerateDevices) return;
+      try {
+        const all = await navigator.mediaDevices.enumerateDevices();
+        if (cancelled) return;
+        setDevices({
+          audioInputs: all.filter((d) => d.kind === 'audioinput' && d.deviceId),
+          videoInputs: all.filter((d) => d.kind === 'videoinput' && d.deviceId),
+          audioOutputs: all.filter((d) => d.kind === 'audiooutput' && d.deviceId),
+          canSelectOutput: typeof (HTMLMediaElement.prototype as any).setSinkId === 'function',
+        });
+      } catch { /* permisos aún no concedidos */ }
+    };
+    void loadDevices();
+    if (navigator.mediaDevices?.addEventListener) {
+      navigator.mediaDevices.addEventListener('devicechange', loadDevices);
+    }
+    return () => {
+      cancelled = true;
+      if (navigator.mediaDevices?.removeEventListener) navigator.mediaDevices.removeEventListener('devicechange', loadDevices);
+    };
+  }, []);
 
   useEffect(() => {
     api<{ iceServers: RTCIceServer[] }>('/system/ice')
@@ -162,41 +243,114 @@ function useCallController() {
     localRef.current = null;
     setLocalStream(null);
     setRemoteStream(null);
+    remoteStreamRef.current = null;
+    remoteAudioRef.current?.removeAttribute('src');
+    remoteAudioRef.current?.load();
+    remoteVideoRef.current?.removeAttribute('src');
+    remoteVideoRef.current?.load();
+    setRemoteAudioLive(false);
+    setConnected(false);
+    setIceState('new');
+    iceStateRef.current = 'new';
+    audioLiveRef.current = false;
     setMuted(false);
     setCameraOn(true);
+    setError(null);
     pendingOfferRef.current = null;
     pendingCandidatesRef.current = [];
+    negotiatingRef.current = false;
   }, []);
+
+  const signal = useCallback((to: string, callId: string, value: unknown) => {
+    socket?.emit('call:signal', { to, callId, signal: value });
+  }, [socket]);
 
   const createPeer = useCallback((peerId: string, callId: string) => {
     const pc = new RTCPeerConnection({ iceServers });
+    pcRef.current = pc;
+    setIceState(pc.iceConnectionState);
+
+    const refreshRemote = () => {
+      const current = remoteStreamRef.current ?? new MediaStream();
+      setRemoteStream(new MediaStream(current.getTracks()));
+      const hasLiveAudio = current.getAudioTracks().some((track) => track.readyState === 'live' && !track.muted);
+      setRemoteAudioLive(hasLiveAudio);
+    };
+
     pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        socket?.emit('call:signal', { to: peerId, callId, signal: { candidate: event.candidate.toJSON() } });
-      }
+      if (event.candidate) signal(peerId, callId, { candidate: event.candidate.toJSON() });
     };
     pc.ontrack = (event) => {
-      setRemoteStream(event.streams[0] ?? new MediaStream([event.track]));
+      const target = remoteStreamRef.current ?? new MediaStream();
+      if (!target.getTracks().some((track) => track.id === event.track.id)) target.addTrack(event.track);
+      remoteStreamRef.current = target;
+      event.track.addEventListener('unmute', refreshRemote);
+      event.track.addEventListener('mute', refreshRemote);
+      event.track.addEventListener('ended', refreshRemote);
+      refreshRemote();
     };
-    pcRef.current = pc;
+    pc.oniceconnectionstatechange = () => {
+      const state = pc.iceConnectionState;
+      setIceState(state);
+      if (state === 'failed' || (state === 'disconnected' && iceStateRef.current === 'connected')) {
+        const current = activeRef.current;
+        if (!current || current.callId !== callId || negotiatingRef.current) return;
+        negotiatingRef.current = true;
+        if (current.role === 'caller') {
+          void (async () => {
+            try {
+              pc.restartIce();
+              if (pc.signalingState !== 'stable') return;
+              const offer = await pc.createOffer({ iceRestart: true });
+              await pc.setLocalDescription(offer);
+              if (pc.localDescription?.sdp) signal(peerId, callId, { type: 'offer', sdp: pc.localDescription.sdp, iceRestart: true });
+            } catch { /* la conexión puede haberse cerrado */ }
+            finally { negotiatingRef.current = false; }
+          })();
+        } else {
+          signal(peerId, callId, { kind: 'restart-request' });
+          negotiatingRef.current = false;
+        }
+      }
+    };
+    pc.onconnectionstatechange = () => {
+      setIceState(pc.connectionState === 'failed' ? 'failed' : pc.iceConnectionState);
+    };
     return pc;
-  }, [iceServers, socket]);
+  }, [iceServers, signal]);
 
   const getMedia = useCallback(async (kind: CallKind) => {
+    const videoConstraints: MediaTrackConstraints | boolean = kind === 'video'
+      ? {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: { ideal: facingMode },
+          ...(videoInputId ? { deviceId: { exact: videoInputId } } : {}),
+        }
+      : false;
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: kind === 'video' ? { width: { ideal: 1280 }, height: { ideal: 720 } } : false,
+      audio: audioInputId ? { deviceId: { exact: audioInputId }, echoCancellation: true, noiseSuppression: true } : { echoCancellation: true, noiseSuppression: true },
+      video: videoConstraints,
     });
     localRef.current = stream;
     setLocalStream(stream);
+    setCameraOn(kind === 'video' && stream.getVideoTracks().some((track) => track.enabled));
+    void navigator.mediaDevices?.enumerateDevices?.().then((all) => {
+      setDevices({
+        audioInputs: all.filter((d) => d.kind === 'audioinput' && d.deviceId),
+        videoInputs: all.filter((d) => d.kind === 'videoinput' && d.deviceId),
+        audioOutputs: all.filter((d) => d.kind === 'audiooutput' && d.deviceId),
+        canSelectOutput: typeof (HTMLMediaElement.prototype as any).setSinkId === 'function',
+      });
+    }).catch(() => {});
     return stream;
-  }, []);
+  }, [audioInputId, facingMode, videoInputId]);
 
   const start = useCallback(async (peer: { id: string; name: string }, kind: CallKind, conversationId: string) => {
     if (!socket) { setError('La conexión en tiempo real no está disponible.'); return; }
     const callId = crypto.randomUUID();
     setError(null);
-    setActive({ callId, kind, peerId: peer.id, peerName: peer.name, status: 'calling' });
+    setActive({ callId, kind, peerId: peer.id, peerName: peer.name, role: 'caller', status: 'calling' });
     startedAtRef.current = Date.now();
     try {
       const stream = await getMedia(kind);
@@ -215,29 +369,30 @@ function useCallController() {
     const call = incoming;
     setIncoming(null);
     setError(null);
-    setActive({ callId: call.callId, kind: call.kind, peerId: call.from.id, peerName: call.from.name, status: 'ringing' });
+    setActive({ callId: call.callId, kind: call.kind, peerId: call.from.id, peerName: call.from.name, role: 'callee', status: 'ringing' });
     startedAtRef.current = Date.now();
     try {
       const stream = await getMedia(call.kind);
       const pc = createPeer(call.from.id, call.callId);
       stream.getTracks().forEach((track) => pc.addTrack(track, stream));
       socket?.emit('call:accept', { callId: call.callId, to: call.from.id });
-      if (pendingOfferRef.current) {
-        await pc.setRemoteDescription(pendingOfferRef.current);
+      const pending = pendingOfferRef.current;
+      if (pending && pending.callId === call.callId) {
+        await pc.setRemoteDescription(pending.description);
         pendingOfferRef.current = null;
         for (const candidate of pendingCandidatesRef.current) await pc.addIceCandidate(candidate).catch(() => {});
         pendingCandidatesRef.current = [];
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        socket?.emit('call:signal', { to: call.from.id, callId: call.callId, signal: { type: 'answer', sdp: answer.sdp } });
-        setActive((current) => (current ? { ...current, status: 'active' } : current));
+        signal(call.from.id, call.callId, { type: 'answer', sdp: answer.sdp });
+        setActive((current) => (current ? { ...current, status: 'connecting' } : current));
       }
     } catch {
       setError('No se pudo acceder al micrófono o a la cámara.');
       cleanup();
       setActive(null);
     }
-  }, [cleanup, createPeer, getMedia, incoming, socket]);
+  }, [cleanup, createPeer, getMedia, incoming, signal, socket]);
 
   const decline = useCallback(() => {
     if (!incoming) return;
@@ -272,6 +427,50 @@ function useCallController() {
     setCameraOn(next);
   }, [cameraOn]);
 
+  const switchAudioInput = useCallback(async (deviceId: string) => {
+    setAudioInputId(deviceId);
+    const track = localRef.current?.getAudioTracks()[0];
+    if (!track || !navigator.mediaDevices?.getUserMedia) return;
+    try {
+      const replacement = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: deviceId } } });
+      const newTrack = replacement.getAudioTracks()[0];
+      if (!newTrack) return;
+      for (const sender of pcRef.current?.getSenders() ?? []) {
+        if (sender.track?.kind === 'audio') await sender.replaceTrack(newTrack);
+      }
+      track.stop();
+      const stream = localRef.current;
+      stream?.removeTrack(track);
+      if (stream && newTrack) stream.addTrack(newTrack);
+    } catch { setError('No se pudo cambiar el micrófono.'); }
+  }, []);
+
+  const switchVideoInput = useCallback(async (deviceId: string) => {
+    setVideoInputId(deviceId);
+    const track = localRef.current?.getVideoTracks()[0];
+    if (!track || !navigator.mediaDevices?.getUserMedia) return;
+    try {
+      const replacement = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } } });
+      const newTrack = replacement.getVideoTracks()[0];
+      if (!newTrack) return;
+      for (const sender of pcRef.current?.getSenders() ?? []) {
+        if (sender.track?.kind === 'video') await sender.replaceTrack(newTrack);
+      }
+      track.stop();
+      const stream = localRef.current;
+      stream?.removeTrack(track);
+      if (stream) stream.addTrack(newTrack);
+    } catch { setError('No se pudo cambiar la cámara.'); }
+  }, []);
+
+  const switchFacingMode = useCallback(async () => {
+    const next = facingMode === 'user' ? 'environment' : 'user';
+    setFacingMode(next);
+    const track = localRef.current?.getVideoTracks()[0];
+    try { await track?.applyConstraints({ facingMode: { ideal: next } }); }
+    catch { setError('Este dispositivo no permite cambiar de cámara.'); }
+  }, [facingMode]);
+
   useEffect(() => {
     if (!socket) return;
 
@@ -283,47 +482,64 @@ function useCallController() {
       setIncoming(payload);
     };
 
+    const sendOffer = async (current: ActiveCall, iceRestart = false) => {
+      const pc = pcRef.current;
+      if (!pc || pc.signalingState !== 'stable') return;
+      if (iceRestart) pc.restartIce();
+      const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined);
+      await pc.setLocalDescription(offer);
+      if (pc.localDescription?.sdp) {
+        signal(current.peerId, current.callId, { type: 'offer', sdp: pc.localDescription.sdp, iceRestart });
+      }
+    };
+
     const onAccepted = async (payload: { callId: string; by: string }) => {
       const current = activeRef.current;
-      if (!current || current.callId !== payload.callId) return;
-      const pc = pcRef.current;
-      if (!pc) return;
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      socket.emit('call:signal', { to: current.peerId, callId: current.callId, signal: { type: 'offer', sdp: offer.sdp } });
-      setActive((value) => (value ? { ...value, status: 'active' } : value));
+      if (!current || current.callId !== payload.callId || current.role !== 'caller') return;
+      try { await sendOffer(current); }
+      catch { setError('No se pudo negociar el canal de audio.'); }
     };
 
     const onSignal = async (payload: { from: string; callId: string; signal: any }) => {
-      const signal = payload.signal;
-      if (!signal) return;
+      const current = activeRef.current;
+      const value = payload.signal;
+      if (!current || payload.callId !== current.callId || !value) return;
 
-      if (signal.candidate) {
-        const pc = pcRef.current;
-        if (pc?.remoteDescription) await pc.addIceCandidate(signal.candidate).catch(() => {});
-        else pendingCandidatesRef.current.push(signal.candidate);
+      if (value.kind === 'restart-request' && current.role === 'caller') {
+        try { await sendOffer(current, true); } catch { /* esperar al siguiente evento */ }
+        return;
+      }
+      if (value.kind === 'restart-ice') {
+        pcRef.current?.restartIce();
         return;
       }
 
-      if (signal.type === 'offer') {
+      if (value.candidate) {
+        const pc = pcRef.current;
+        if (pc?.remoteDescription) await pc.addIceCandidate(value.candidate).catch(() => {});
+        else pendingCandidatesRef.current.push(value.candidate);
+        return;
+      }
+
+      if (value.type === 'offer') {
         const pc = pcRef.current;
         if (!pc) {
-          pendingOfferRef.current = { type: 'offer', sdp: signal.sdp };
+          pendingOfferRef.current = { callId: payload.callId, description: { type: 'offer', sdp: value.sdp } };
           return;
         }
-        await pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
+        await pc.setRemoteDescription({ type: 'offer', sdp: value.sdp });
         for (const candidate of pendingCandidatesRef.current) await pc.addIceCandidate(candidate).catch(() => {});
         pendingCandidatesRef.current = [];
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        socket.emit('call:signal', { to: payload.from, callId: payload.callId, signal: { type: 'answer', sdp: answer.sdp } });
-        setActive((value) => (value ? { ...value, status: 'active' } : value));
+        signal(payload.from, payload.callId, { type: 'answer', sdp: answer.sdp });
+        setActive((state) => (state ? { ...state, status: 'connecting' } : state));
         return;
       }
 
-      if (signal.type === 'answer') {
-        await pcRef.current?.setRemoteDescription({ type: 'answer', sdp: signal.sdp }).catch(() => {});
-        setActive((value) => (value ? { ...value, status: 'active' } : value));
+      if (value.type === 'answer') {
+        await pcRef.current?.setRemoteDescription({ type: 'answer', sdp: value.sdp }).catch(() => {});
+        setActive((state) => (state ? { ...state, status: 'connecting' } : state));
       }
     };
 
@@ -354,9 +570,15 @@ function useCallController() {
       socket.off('call:declined', onDeclined);
       socket.off('call:ended', onEnded);
     };
-  }, [cleanup, socket]);
+  }, [cleanup, signal, socket]);
 
-  return { active, incoming, localStream, remoteStream, muted, cameraOn, error, start, accept, decline, end, toggleMute, toggleCamera, setError };
+  return {
+    active, incoming, localStream, remoteStream, connected, iceState, remoteAudioLive,
+    devices, audioInputId, videoInputId, audioOutputId, facingMode,
+    muted, cameraOn, error, start, accept, decline, end, toggleMute, toggleCamera,
+    switchAudioInput, switchVideoInput, switchFacingMode, setAudioOutputId,
+    remoteAudioRef, remoteVideoRef, setError,
+  };
 }
 
 type CallController = ReturnType<typeof useCallController>;
@@ -369,6 +591,19 @@ function CallLayer({ call }: { call: CallController }) {
     const timer = window.setInterval(() => setSeconds((value) => value + 1), 1000);
     return () => window.clearInterval(timer);
   }, [call.active]);
+
+  useEffect(() => {
+    const attach = (element: HTMLMediaElement | null) => {
+      if (!element) return;
+      if (element.srcObject !== call.remoteStream) {
+        element.srcObject = call.remoteStream ?? null;
+        if (call.remoteStream) void element.play().catch(() => {});
+      } else if (call.remoteStream && element.paused) {
+        void element.play().catch(() => {});
+      }
+    };
+    attach(call.active?.kind === 'video' ? call.remoteVideoRef.current : call.remoteAudioRef.current);
+  }, [call.active?.kind, call.remoteAudioRef, call.remoteVideoRef, call.remoteStream]);
 
   if (!call.active && !call.incoming) return null;
 
@@ -411,11 +646,14 @@ function CallLayer({ call }: { call: CallController }) {
           <div>
             <p className="text-[14px] font-medium text-white/90">{call.active.peerName}</p>
             <p className="text-[11px] text-white/40">
-              {call.active.status === 'active' ? `En llamada · ${clock}` : call.active.status === 'ringing' ? 'Conectando…' : 'Llamando…'}
+              {call.connected ? `En llamada · ${clock}` : call.active.status === 'ringing' || call.active.status === 'connecting' ? 'Conectando…' : 'Llamando…'}
             </p>
+            {call.active.status === 'active' && !call.connected && (
+              <p className="mt-0.5 text-[10px] text-amber-300/70">Audio no disponible · verificando permisos y red</p>
+            )}
           </div>
         </div>
-        <Badge tone={call.active.status === 'active' ? 'success' : 'warn'}>
+        <Badge tone={call.connected ? 'success' : 'warn'}>
           {video ? 'Video' : 'Voz'}
         </Badge>
       </div>
@@ -424,7 +662,7 @@ function CallLayer({ call }: { call: CallController }) {
         {video ? (
           <>
             <video
-              ref={(element) => { if (element) element.srcObject = call.remoteStream; }}
+              ref={call.remoteVideoRef}
               autoPlay
               playsInline
               className="max-h-full w-full max-w-5xl rounded-2xl bg-black object-contain"
@@ -443,8 +681,11 @@ function CallLayer({ call }: { call: CallController }) {
               <Avatar name={call.active.peerName} size={112} />
             </div>
             <p className="mt-5 font-display text-2xl text-white/90">{call.active.peerName}</p>
-            <p className="mt-1 text-[12px] text-white/35">{call.active.status === 'active' ? `En llamada · ${clock}` : 'Estableciendo conexión…'}</p>
-            {call.remoteStream && <p className="mt-3 flex items-center justify-center gap-1.5 text-[11px] text-white/60"><Volume2 size={12} /> Audio conectado</p>}
+            <p className="mt-1 text-[12px] text-white/35">{call.connected ? `En llamada · ${clock}` : 'Estableciendo conexión…'}</p>
+            <p className={cn('mt-3 flex items-center justify-center gap-1.5 text-[11px]', call.connected ? 'text-white/60' : 'text-amber-300/70')}>
+              <Volume2 size={12} /> {call.connected ? 'Audio conectado' : 'Audio no disponible'}
+            </p>
+            <audio ref={call.remoteAudioRef} autoPlay playsInline className="hidden" />
           </div>
         )}
       </div>
@@ -455,13 +696,48 @@ function CallLayer({ call }: { call: CallController }) {
         </p>
       )}
 
+      {(call.devices.audioInputs.length > 1 || call.devices.videoInputs.length > 1 || call.devices.audioOutputs.length > 0) && (
+        <div className="relative mx-auto mb-2 flex max-w-3xl flex-wrap items-center justify-center gap-2 px-4 text-[10px] text-white/45">
+          {call.devices.audioInputs.length > 1 && (
+            <label className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/[.04] px-2 py-1">
+              Mic
+              <select value={call.audioInputId} onChange={(event) => void call.switchAudioInput(event.target.value)} className="max-w-[130px] bg-transparent text-white/70 outline-none [&>option]:bg-[#101013]">
+                {call.devices.audioInputs.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Micrófono ${index + 1}`}</option>)}
+              </select>
+            </label>
+          )}
+          {video && call.devices.videoInputs.length > 1 && (
+            <label className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/[.04] px-2 py-1">
+              Cámara
+              <select value={call.videoInputId} onChange={(event) => void call.switchVideoInput(event.target.value)} className="max-w-[130px] bg-transparent text-white/70 outline-none [&>option]:bg-[#101013]">
+                {call.devices.videoInputs.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Cámara ${index + 1}`}</option>)}
+              </select>
+            </label>
+          )}
+          {call.devices.canSelectOutput && call.devices.audioOutputs.length > 0 && (
+            <label className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/[.04] px-2 py-1">
+              Salida
+              <select value={call.audioOutputId} onChange={(event) => call.setAudioOutputId(event.target.value)} className="max-w-[130px] bg-transparent text-white/70 outline-none [&>option]:bg-[#101013]">
+                <option value="">Predeterminada</option>
+                {call.devices.audioOutputs.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Altavoz ${index + 1}`}</option>)}
+              </select>
+            </label>
+          )}
+          {video && (
+            <button type="button" onClick={() => void call.switchFacingMode()} className="rounded-lg border border-white/10 bg-white/[.04] px-2 py-1 text-white/60 hover:bg-white/[.1]">
+              Cámara {call.facingMode === 'user' ? 'frontal' : 'trasera'}
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="relative flex items-center justify-center gap-3 px-5 pb-8 pt-4">
         <button
           onClick={call.toggleMute}
           className={cn('flex h-12 w-12 items-center justify-center rounded-full border transition-colors', call.muted ? 'border-transparent bg-white text-[#0a0a0b]' : 'border-white/15 bg-white/[.06] text-white/80 hover:bg-white/[.12]')}
           aria-label={call.muted ? 'Activar micrófono' : 'Silenciar micrófono'}
         >
-          {call.muted ? <Mic size={19} /> : <Mic size={19} />}
+          {call.muted ? <MicOff size={19} /> : <Mic size={19} />}
         </button>
         {video && (
           <button
@@ -1456,7 +1732,7 @@ export default function Messages() {
                         ) : null}
 
                         {message.attachment && (message.kind === 'audio' || message.attachment.mime.startsWith('audio/')) && (
-                          <AudioNote src={`/api/files/${message.attachment.id}`} name={message.attachment.name} />
+                          <AudioNote fileId={message.attachment.id} name={message.attachment.name} />
                         )}
                         {message.attachment && message.kind === 'file' && (
                           <a href={`/api/files/${message.attachment.id}`} target="_blank" rel="noreferrer" className={cn('flex items-center gap-2 rounded-lg px-2 py-1.5', mine ? 'bg-white/10 hover:bg-white/20 dark:bg-black/[.06] dark:hover:bg-black/[.1]' : 'bg-fg/[.04] hover:bg-fg/[.07]')}>
