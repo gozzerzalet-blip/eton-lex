@@ -108,12 +108,12 @@ function assertConfigured() {
         throw new ApiError(503, 'AI_MODEL_MISSING', 'Falta AI_MODEL en la configuración del servidor.');
     }
 }
-export async function* streamChat(messages, signal) {
+export async function* streamChat(messages, signal, onUsage) {
     assertConfigured();
     const main = primary();
     let emitted = false;
     try {
-        for await (const delta of streamWith(main, messages, signal)) {
+        for await (const delta of streamChatWith(main, messages, signal, onUsage)) {
             emitted = true;
             yield delta;
         }
@@ -124,22 +124,32 @@ export async function* streamChat(messages, signal) {
         if (emitted || signal?.aborted || !config.ai.fallback.configured)
             throw err;
         console.warn(`[ai] proveedor ${main.provider} falló (${err.message}); se usa el respaldo ${config.ai.fallback.provider}.`);
-        for await (const delta of streamWith(fallback(), messages, signal))
+        for await (const delta of streamChatWith(fallback(), messages, signal, onUsage))
             yield delta;
     }
 }
-async function* streamWith(t, messages, signal) {
+/** Transmite usando un destino concreto (lo usa el router por capacidad). */
+export async function* streamChatWith(t, messages, signal, onUsage) {
     if (t.provider === 'anthropic') {
-        yield* streamAnthropic(t, messages, signal);
+        yield* streamAnthropic(t, messages, signal, onUsage);
         return;
     }
     if (t.provider === 'google') {
-        yield* streamGoogle(t, messages, signal);
+        yield* streamGoogle(t, messages, signal, onUsage);
         return;
     }
-    yield* streamOpenAI(t, messages, signal);
+    yield* streamOpenAI(t, messages, signal, onUsage);
 }
-async function* streamOpenAI(t, messages, signal) {
+/** Paso de razonamiento: acumula la salida sin emitirla al usuario todavía. */
+export async function completeChat(t, messages, signal) {
+    let text = '';
+    let usage = null;
+    for await (const delta of streamChatWith(t, messages, signal, (u) => { usage = u; })) {
+        text += delta;
+    }
+    return { text, usage };
+}
+async function* streamOpenAI(t, messages, signal, onUsage) {
     const body = {
         model: t.model,
         stream: true,
@@ -169,6 +179,8 @@ async function* streamOpenAI(t, messages, signal) {
     for await (const data of sseLines(res)) {
         try {
             const json = JSON.parse(data);
+            if (json.usage)
+                onUsage?.(json.usage);
             const delta = json.choices?.[0]?.delta?.content;
             if (delta)
                 yield delta;
@@ -178,7 +190,7 @@ async function* streamOpenAI(t, messages, signal) {
         }
     }
 }
-async function* streamAnthropic(t, messages, signal) {
+async function* streamAnthropic(t, messages, signal, onUsage) {
     const system = messages.filter((m) => m.role === 'system').map((m) => textOf(m.content)).join('\n\n');
     const rest = messages.filter((m) => m.role !== 'system');
     const body = {
@@ -211,6 +223,8 @@ async function* streamAnthropic(t, messages, signal) {
     for await (const data of sseLines(res)) {
         try {
             const json = JSON.parse(data);
+            if (json.usage)
+                onUsage?.(json.usage);
             if (json.type === 'content_block_delta' && json.delta?.type === 'text_delta' && json.delta.text) {
                 yield json.delta.text;
             }
@@ -220,7 +234,7 @@ async function* streamAnthropic(t, messages, signal) {
         }
     }
 }
-async function* streamGoogle(t, messages, signal) {
+async function* streamGoogle(t, messages, signal, onUsage) {
     const system = messages.filter((m) => m.role === 'system').map((m) => textOf(m.content)).join('\n\n');
     const contents = messages
         .filter((m) => m.role !== 'system')
@@ -248,6 +262,8 @@ async function* streamGoogle(t, messages, signal) {
     for await (const data of sseLines(res)) {
         try {
             const json = JSON.parse(data);
+            if (json.usageMetadata)
+                onUsage?.(json.usageMetadata);
             const text = json.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('') ?? '';
             if (text)
                 yield text;

@@ -40,6 +40,11 @@ export function connectSocket(token: string): Socket {
   return socket;
 }
 
+/** Actualiza la credencial del socket tras un refresh de access token. */
+export function updateSocketToken(token: string): void {
+  if (socket) socket.auth = { token };
+}
+
 export function getSocket(): Socket | null {
   return socket;
 }

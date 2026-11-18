@@ -528,6 +528,123 @@ CREATE TABLE IF NOT EXISTS chunks (
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_ref ON chunks(ref_type, ref_id);
 
+-- Fase 2: fragmentos citables de documentos extensos. Cada fila conserva la
+-- página, el desplazamiento de carácter y la sección de origen, de modo que una
+-- cita pueda decir «pág. 4, sección CAPÍTULO II» sin inventar nada.
+CREATE TABLE IF NOT EXISTS document_chunks (
+  id              TEXT PRIMARY KEY,
+  document_id     TEXT NOT NULL REFERENCES ai_documents(id) ON DELETE CASCADE,
+  user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  conversation_id TEXT,
+  chunk_index     INTEGER NOT NULL,
+  page            INTEGER,
+  char_offset     INTEGER NOT NULL,
+  section         TEXT,
+  label           TEXT NOT NULL,
+  text            TEXT NOT NULL,
+  chars           INTEGER NOT NULL,
+  embedding       BLOB,
+  dim             INTEGER,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_docchunks_owner ON document_chunks(user_id, conversation_id);
+CREATE INDEX IF NOT EXISTS idx_docchunks_doc ON document_chunks(document_id, chunk_index);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS document_chunks_fts USING fts5(
+  chunk_id, label, text
+);
+CREATE TRIGGER IF NOT EXISTS document_chunks_ai AFTER INSERT ON document_chunks BEGIN
+  INSERT INTO document_chunks_fts(rowid, chunk_id, label, text)
+  VALUES (new.rowid, new.id, new.label, new.text);
+END;
+-- Se borra por chunk_id en lugar de usar la sintaxis 'delete' con rowid: así
+-- funciona también cuando la fila desaparece por ON DELETE CASCADE.
+CREATE TRIGGER IF NOT EXISTS document_chunks_ad AFTER DELETE ON document_chunks BEGIN
+  DELETE FROM document_chunks_fts WHERE chunk_id = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS document_chunks_au AFTER UPDATE ON document_chunks BEGIN
+  DELETE FROM document_chunks_fts WHERE chunk_id = old.id;
+  INSERT INTO document_chunks_fts(rowid, chunk_id, label, text)
+  VALUES (new.rowid, new.id, new.label, new.text);
+END;
+
+-- Fase 3: archivos generados de verdad en el backend (sin PDF). La ruta se
+-- guarda bajo DATA_DIR/uploads/generated y nunca se expone al cliente.
+CREATE TABLE IF NOT EXISTS generated_files (
+  id              TEXT PRIMARY KEY,
+  user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  conversation_id TEXT,
+  kind            TEXT NOT NULL CHECK (kind IN ('docx','pptx','xlsx')),
+  name            TEXT NOT NULL,
+  mime            TEXT NOT NULL,
+  path            TEXT NOT NULL,
+  size            INTEGER NOT NULL,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_generated_user ON generated_files(user_id, created_at DESC);
+
+-- Consumo real de IA: cada llamada a un modelo registra rol, destino y latencia.
+CREATE TABLE IF NOT EXISTS ai_usage (
+  id              TEXT PRIMARY KEY,
+  user_id         TEXT REFERENCES users(id) ON DELETE SET NULL,
+  conversation_id TEXT,
+  role            TEXT NOT NULL, -- reasoning | clarity | single | biblioteca
+  provider        TEXT NOT NULL,
+  model           TEXT NOT NULL,
+  prompt_chars    INTEGER NOT NULL DEFAULT 0,
+  completion_chars INTEGER NOT NULL DEFAULT 0,
+  usage_json      TEXT,
+  latency_ms      INTEGER,
+  ok              INTEGER NOT NULL DEFAULT 1,
+  error           TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_user ON ai_usage(user_id, created_at DESC);
+
+-- Fase 5: tutor y evaluación. Las preguntas se generan solo con texto real de
+-- la biblioteca o de documentos propios; nunca se inventa una respuesta.
+CREATE TABLE IF NOT EXISTS tutor_sessions (
+  id            TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  area          TEXT,
+  topic         TEXT,
+  document_id   TEXT REFERENCES ai_documents(id) ON DELETE SET NULL,
+  question_count INTEGER NOT NULL DEFAULT 5,
+  status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','completed')),
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tutor_sessions_user ON tutor_sessions(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS tutor_questions (
+  id             TEXT PRIMARY KEY,
+  session_id     TEXT NOT NULL REFERENCES tutor_sessions(id) ON DELETE CASCADE,
+  position       INTEGER NOT NULL,
+  prompt         TEXT NOT NULL,
+  options_json   TEXT NOT NULL,
+  correct_index  INTEGER NOT NULL,
+  explanation    TEXT NOT NULL,
+  citations_json TEXT NOT NULL DEFAULT '[]',
+  source_text    TEXT NOT NULL,
+  source_label   TEXT NOT NULL,
+  source_url     TEXT,
+  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_tutor_questions_session ON tutor_questions(session_id, position);
+
+CREATE TABLE IF NOT EXISTS tutor_attempts (
+  id          TEXT PRIMARY KEY,
+  session_id  TEXT NOT NULL REFERENCES tutor_sessions(id) ON DELETE CASCADE,
+  question_id TEXT NOT NULL REFERENCES tutor_questions(id) ON DELETE CASCADE,
+  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  answer_index INTEGER NOT NULL,
+  correct     INTEGER NOT NULL,
+  feedback    TEXT NOT NULL,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_tutor_attempts_session ON tutor_attempts(session_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tutor_attempts_once ON tutor_attempts(session_id, question_id);
+
 -- ── Notificaciones y sistema ────────────────────────────────────
 CREATE TABLE IF NOT EXISTS notifications (
   id         TEXT PRIMARY KEY,
@@ -584,6 +701,10 @@ CREATE TRIGGER IF NOT EXISTS news_ai AFTER INSERT ON news BEGIN
 END;
 CREATE TRIGGER IF NOT EXISTS news_ad AFTER DELETE ON news BEGIN
   INSERT INTO news_fts(news_fts, rowid, title, summary, body) VALUES ('delete', old.rowid, old.title, old.summary, old.body);
+END;
+CREATE TRIGGER IF NOT EXISTS news_au AFTER UPDATE ON news BEGIN
+  INSERT INTO news_fts(news_fts, rowid, title, summary, body) VALUES ('delete', old.rowid, old.title, old.summary, old.body);
+  INSERT INTO news_fts(rowid, title, summary, body) VALUES (new.rowid, new.title, new.summary, new.body);
 END;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS norms_fts USING fts5(

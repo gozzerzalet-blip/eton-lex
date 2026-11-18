@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  Bell, BookMarked, ChevronRight, Command, Home, Library, LogOut, Menu, MessageSquare,
+  Bell, BookMarked, ChevronRight, Command, GraduationCap, Home, Library, LogOut, Menu, MessageSquare,
   Newspaper, Scale, Search, Settings, ShieldCheck, Sparkles, User, Users, Video, X,
 } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -18,6 +18,7 @@ import { toast } from 'sonner';
 const NAV = [
   { to: '/', label: 'Inicio', icon: Home, end: true },
   { to: '/ai', label: 'ETON AI', icon: Sparkles, accent: true },
+  { to: '/tutor', label: 'Tutor jurídico', icon: GraduationCap },
   { to: '/biblioteca', label: 'Biblioteca jurídica', icon: Library },
   { to: '/noticias', label: 'Noticias', icon: Newspaper },
   { to: '/actualizaciones', label: 'Actualizaciones', icon: Scale },
@@ -37,6 +38,7 @@ const ACCOUNT = [
 const MOBILE_NAV = [
   { to: '/', label: 'Inicio', icon: Home, end: true },
   { to: '/ai', label: 'ETON AI', icon: Sparkles },
+  { to: '/tutor', label: 'Tutor', icon: GraduationCap },
   { to: '/biblioteca', label: 'Biblioteca', icon: Library },
   { to: '/mensajes', label: 'Mensajes', icon: MessageSquare },
   { to: '/salas', label: 'Salas', icon: Video },
@@ -364,13 +366,18 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
             <div className="grid gap-1.5 sm:grid-cols-2">
               {[
                 ['Preguntar a ETON AI', '/ai'],
+                ['Practicar con el tutor jurídico', '/tutor'],
                 ['Explorar la biblioteca', '/biblioteca'],
                 ['Últimas noticias jurídicas', '/noticias'],
                 ['Actualizaciones legislativas', '/actualizaciones'],
                 ['Salas de videoconferencia', '/salas'],
               ].map(([label, path]) => (
                 <button key={path} onClick={() => go(path)} className="flex items-center gap-2.5 rounded-xl border border-line px-3 py-2.5 text-left text-[12.5px] text-fg/60 hover:bg-fg/[.04] hover:text-fg">
-                  {path === '/salas' ? <Video size={14} className="text-fg/30" /> : <Sparkles size={14} className="text-fg/30" />} {label}
+                  {path === '/salas'
+                    ? <Video size={14} className="text-fg/30" />
+                    : path === '/tutor'
+                      ? <GraduationCap size={14} className="text-fg/30" />
+                      : <Sparkles size={14} className="text-fg/30" />} {label}
                 </button>
               ))}
             </div>

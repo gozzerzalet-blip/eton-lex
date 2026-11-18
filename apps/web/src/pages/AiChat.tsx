@@ -5,8 +5,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  ArrowUp, BookOpen, Copy, FileText, Globe2, Mic, MicOff, Paperclip, Plus, RefreshCw, Sparkles,
-  Square, Trash2, Volume2, VolumeX, X,
+  ArrowUp, BookOpen, Copy, FileSpreadsheet, FileText, Globe2, Mic, MicOff, Paperclip,
+  Plus, Presentation, RefreshCw, Sparkles, Square, Trash2, Volume2, VolumeX, X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, ApiClientError, streamAiMessage } from '../lib/api';
@@ -15,9 +15,20 @@ import { cn, formatBytes, timeAgo } from '../lib/utils';
 import { Avatar, Badge, EmptyState, Spinner } from '../components/ui';
 
 type Conversation = { id: string; title: string; mode: string; updated_at: string; messages?: number; preview?: string };
-type AiStatus = { configured: boolean; provider: string; model: string | null; embeddings: boolean; fallback?: { provider: string; model: string | null; active: boolean } | null; modes: Array<{ id: string; label: string }>; limits: { maxUploadMb: number } };
+type GeneratedKind = 'docx' | 'pptx' | 'xlsx';
+type AiStatus = {
+  configured: boolean;
+  provider: string;
+  model: string | null;
+  embeddings: boolean;
+  fallback?: { provider: string; model: string | null; active: boolean } | null;
+  modes: Array<{ id: string; label: string }>;
+  exports?: Array<{ kind: GeneratedKind; label: string; enabled: boolean }>;
+  limits: { maxUploadMb: number };
+};
 
 type Attachment = { id: string; name: string; size: number; mime: string; extracted: boolean; note?: string | null };
+type GeneratedFile = { id: string; name: string; kind: GeneratedKind; mime: string; size: number; downloadUrl: string };
 
 const STARTERS = [
   { title: 'Explicar un artículo', text: 'Explícame, como si recién empezara Derecho, el artículo 140 del Código Civil peruano.' },
@@ -45,6 +56,7 @@ export default function AiChat() {
   const [citations, setCitations] = useState<AiCitation[]>([]);
   const [plan, setPlan] = useState<{ kind: string; label: string; usesWeb: boolean } | null>(null);
   const [research, setResearch] = useState<string | null>(null);
+  const [exporting, setExporting] = useState<GeneratedKind | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -57,6 +69,11 @@ export default function AiChat() {
   const activeConversation = useMemo(
     () => convData?.conversations.find((c) => c.id === activeId) ?? null,
     [convData, activeId],
+  );
+
+  const lastAssistant = useMemo(
+    () => [...messages].reverse().find((m) => m.role === 'assistant' && m.content.trim()) ?? null,
+    [messages],
   );
 
   const loadConversation = async (id: string) => {
@@ -243,6 +260,46 @@ export default function AiChat() {
     queryClient.invalidateQueries({ queryKey: ['ai-conversations'] });
   };
 
+  const exportAnswer = async (kind: GeneratedKind) => {
+    if (!lastAssistant || exporting) return;
+    const title = activeConversation?.title
+      ?? messages.find((m) => m.role === 'user')?.content.slice(0, 70)
+      ?? 'Consulta ETON AI';
+    setExporting(kind);
+    try {
+      const { file } = await api<{ file: GeneratedFile }>('/ai/generated', {
+        method: 'POST',
+        body: JSON.stringify({
+          kind,
+          title: title.trim() || 'Consulta ETON AI',
+          conversationId: activeId ?? undefined,
+          content: activeId ? undefined : lastAssistant.content,
+        }),
+      });
+      const response = await api<Response>(file.downloadUrl, {}, { raw: true });
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = file.name;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast.success(`${kind.toUpperCase()} generado y descargado.`);
+    } catch (err) {
+      toast.error(err instanceof ApiClientError ? err.message : 'No se pudo generar el archivo.');
+    } finally {
+      setExporting(null);
+    }
+  };
+
+  const exportOptions: Array<{ kind: GeneratedKind; label: string; icon: typeof FileText }> = [
+    { kind: 'docx', label: 'Word', icon: FileText },
+    { kind: 'pptx', label: 'PowerPoint', icon: Presentation },
+    { kind: 'xlsx', label: 'Excel', icon: FileSpreadsheet },
+  ];
+
   return (
     <div className="grid h-[calc(100vh-9.5rem)] min-h-[540px] grid-cols-1 gap-4 lg:grid-cols-[280px_1fr]">
       {/* Historial */}
@@ -297,6 +354,26 @@ export default function AiChat() {
             <select value={mode} onChange={(e) => setMode(e.target.value)} className="input !w-auto !py-1.5 !text-[11.5px]">
               {(status?.modes ?? [{ id: 'auto', label: 'Adaptativo' }]).map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
             </select>
+            {(status?.exports ?? [
+              { kind: 'docx', label: 'Word', enabled: true },
+              { kind: 'pptx', label: 'PowerPoint', enabled: true },
+              { kind: 'xlsx', label: 'Excel', enabled: true },
+            ]).filter((e) => e.enabled).map((e) => {
+              const option = exportOptions.find((o) => o.kind === e.kind);
+              if (!option) return null;
+              const Icon = option.icon;
+              return (
+                <button
+                  key={e.kind}
+                  onClick={() => exportAnswer(e.kind)}
+                  disabled={!lastAssistant || exporting !== null}
+                  className="btn btn-sm !px-2"
+                  title={lastAssistant ? `Exportar respuesta a ${option.label}` : 'Espera a que ETON AI responda para exportar'}
+                >
+                  {exporting === e.kind ? <Spinner size={14} /> : <Icon size={14} />}
+                </button>
+              );
+            })}
             <button
               onClick={() => { setVoiceOutput((v) => !v); if (voiceOutput) window.speechSynthesis.cancel(); }}
               className={cn('btn btn-sm !px-2', voiceOutput && '!border-fg/30 !bg-fg/[.06] !text-fg')}
@@ -446,7 +523,7 @@ function MessageBubble({ message, onCopy }: { message: AiMessage; onCopy: () => 
   );
 }
 
-function CitationList({ citations }: { citations: AiCitation[] }) {
+export function CitationList({ citations }: { citations: AiCitation[] }) {
   if (!citations || citations.length === 0) return null;
   const library = citations.filter((c) => c.kind !== 'web');
   const web = citations.filter((c) => c.kind === 'web');

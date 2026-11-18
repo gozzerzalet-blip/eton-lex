@@ -219,6 +219,23 @@ export function initRealtime(io: Server) {
       } else {
         online.set(userId, next);
       }
+
+      // Una desconección (cierre de pestaña, pérdida de red o refresco de token)
+      // no debe dejar llamadas colgadas en memoria ni marcarlas como fallidas.
+      for (const call of [...activeCalls.values()]) {
+        if (call.callerId !== userId && call.calleeId !== userId) continue;
+        const other = call.callerId === userId ? call.calleeId : call.callerId;
+        clearCall(call.id);
+        if (call.status === 'ringing') {
+          db.prepare("UPDATE call_history SET status = 'missed', ended_at = datetime('now') WHERE id = ? AND status = 'missed'")
+            .run(call.id);
+          io.to(`user:${other}`).emit('call:missed', { callId: call.id });
+        } else {
+          db.prepare("UPDATE call_history SET status = 'completed', ended_at = datetime('now') WHERE id = ? AND status NOT IN ('declined', 'completed')")
+            .run(call.id);
+          io.to(`user:${other}`).emit('call:ended', { callId: call.id });
+        }
+      }
     });
   });
 }

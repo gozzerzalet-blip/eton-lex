@@ -9,10 +9,11 @@
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "start": "node dist/server.js",
     "db:migrate": "tsx src/db/migrate.ts",
+    "db:restore": "tsx src/scripts/restore.ts",
     "db:seed": "tsx src/db/seed.ts",
     "ingest": "tsx src/scripts/ingest.ts",
     "ingest:legal": "tsx src/scripts/legal-ingest.ts",
-    "test": "tsx src/tests/smoke.test.ts",
+    "test": "tsx src/tests/smoke.test.ts && tsx src/tests/migration.test.ts && tsx src/tests/phase1.test.ts && tsx src/tests/phase2.test.ts && tsx src/tests/phase3.test.ts && tsx src/tests/phase5.test.ts",
     "e2e": "tsx src/tests/e2e.ts"
   },
   "dependencies": {
@@ -20,7 +21,9 @@
     "compression": "^1.7.5",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
+    "docx": "^9.15.4",
     "dotenv": "^16.4.7",
+    "exceljs": "^4.4.0",
     "express": "^4.21.2",
     "express-rate-limit": "^7.4.1",
     "helmet": "^8.0.0",
@@ -30,6 +33,7 @@
     "node-cron": "^3.0.3",
     "nodemailer": "^7.0.0",
     "pdf-parse": "^1.1.1",
+    "pptxgenjs": "^4.0.1",
     "rss-parser": "^3.13.0",
     "socket.io": "^4.8.1",
     "zod": "^3.24.1"

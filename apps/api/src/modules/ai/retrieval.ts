@@ -3,7 +3,7 @@ import { embedTexts } from './providers.js';
 
 export type RetrievedBlock = {
   id: string;
-  kind: 'article' | 'norm' | 'news' | 'userdoc' | 'web';
+  kind: 'article' | 'norm' | 'news' | 'userdoc' | 'web' | 'tool';
   label: string;
   text: string;
   url: string | null;
@@ -17,6 +17,12 @@ export type RetrievedBlock = {
   articleNumber?: string;
   official?: boolean;
   publishedAt?: string | null;
+  /** Localización dentro de un documento del usuario (Fase 2). */
+  page?: number | null;
+  charOffset?: number;
+  section?: string | null;
+  documentName?: string;
+  chunkIndex?: number;
 };
 
 const STOPWORDS = new Set(
@@ -75,18 +81,21 @@ function cosine(a: number[], b: number[]): number {
   return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
 }
 
-function semanticSearch(query: string, userId: string | null, limit: number): RetrievedBlock[] {
+function semanticSearch(queryVector: number[], userId: string | null, conversationId: string | null, limit: number): RetrievedBlock[] {
+  // Los documentos del usuario solo pueden filtrarse en la conversación a la
+  // que pertenecen. Sin este filtro, una pregunta en un chat aparejaba
+  // documentos privados de otras conversaciones del mismo usuario.
   const rows = db.prepare(`
     SELECT id, ref_type, ref_id, label, text, embedding, dim FROM chunks
     WHERE embedding IS NOT NULL AND (ref_type != 'userdoc' OR ref_id IN (
-      SELECT id FROM ai_documents WHERE user_id = ?
+      SELECT id FROM ai_documents WHERE user_id = ? AND conversation_id = ?
     ))
     LIMIT 8000
-  `).all(userId ?? '') as Array<{ id: string; ref_type: string; ref_id: string; label: string; text: string; embedding: Buffer; dim: number }>;
+  `).all(userId ?? '', conversationId ?? '') as Array<{ id: string; ref_type: string; ref_id: string; label: string; text: string; embedding: Buffer; dim: number }>;
   return rows
     .map((r) => {
       const vec = Array.from(new Float32Array(r.embedding.buffer, r.embedding.byteOffset, r.embedding.byteLength / 4));
-      return { row: r, score: cosine(vec, (globalThis as any).__etonQueryVec as number[]) };
+      return { row: r, score: cosine(vec, queryVector) };
     })
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
@@ -101,7 +110,12 @@ function semanticSearch(query: string, userId: string | null, limit: number): Re
     }));
 }
 
-export async function retrieveForChat(query: string, userId: string | null, limit = 8): Promise<RetrievedBlock[]> {
+export async function retrieveForChat(
+  query: string,
+  userId: string | null,
+  conversationId: string | null = null,
+  limit = 8,
+): Promise<RetrievedBlock[]> {
   const blocks: RetrievedBlock[] = [];
   const q = ftsQuery(query);
   const tokens = tokensOf(query);
@@ -194,22 +208,65 @@ export async function retrieveForChat(query: string, userId: string | null, limi
     try {
       const vecs = await embedTexts([query]);
       if (vecs?.[0]) {
-        (globalThis as any).__etonQueryVec = vecs[0];
-        blocks.push(...semanticSearch(query, userId, 5));
+        // El vector se pasa por parámetro: usarlo en un global mezclaba
+        // consultas cuando dos usuarios preguntaban al mismo tiempo.
+        blocks.push(...semanticSearch(vecs[0], userId, conversationId, 5));
       }
     } catch (err) {
       console.warn('[rag] embeddings no disponibles:', (err as Error).message);
     }
   }
 
-  // Documentos del usuario vinculados a la conversación se añaden siempre al final.
-  if (userId) {
+  // Documentos del usuario vinculados a ESTA conversación. Los fragmentos con
+  // página/sección se buscan por texto y se entregan como fuentes citables; los
+  // documentos sin fragmentos (pequeños o sin texto extraíble) se entregan
+  // completos como antes, para no romper el seguimiento.
+  if (userId && conversationId) {
+    if (q) {
+      const chunkRows = db.prepare(`
+        SELECT c.*, bm25(document_chunks_fts) AS rank
+        FROM document_chunks_fts
+        JOIN document_chunks c ON c.rowid = document_chunks_fts.rowid
+        WHERE document_chunks_fts MATCH ? AND c.user_id = ? AND c.conversation_id = ?
+        ORDER BY rank LIMIT 8
+      `).all(q, userId, conversationId) as any[];
+      const needed = Math.min(2, tokens.length);
+      for (const r of chunkRows) {
+        if (coverage(tokens, r.text) < needed) continue;
+        const location = [
+          r.page ? `pág. ${r.page}` : null,
+          r.section ? `sección ${r.section}` : null,
+          `carácter ${r.char_offset}`,
+        ].filter(Boolean).join(' · ');
+        blocks.push({
+          id: `chunk_${r.id}`,
+          kind: 'userdoc',
+          label: `Documento del usuario · ${r.label} — ${location}`,
+          text: r.text,
+          url: null,
+          meta: `Fragmento ${r.chunk_index + 1} de documento privado · ${location}`,
+          score: 0.55,
+          documentId: r.document_id,
+          page: r.page ?? null,
+          charOffset: r.char_offset,
+          section: r.section ?? null,
+          documentName: r.label,
+          chunkIndex: r.chunk_index,
+        });
+      }
+    }
+
+    const withChunks = new Set(
+      (db.prepare('SELECT DISTINCT document_id FROM document_chunks WHERE user_id = ? AND conversation_id = ?')
+        .all(userId, conversationId) as Array<{ document_id: string }>).map((r) => r.document_id),
+    );
     const docs = db.prepare(`
       SELECT id, name, extracted FROM ai_documents
-      WHERE user_id = ? AND extracted IS NOT NULL
+      WHERE user_id = ? AND conversation_id = ? AND extracted IS NOT NULL
       ORDER BY created_at DESC LIMIT 3
-    `).all(userId) as Array<{ id: string; name: string; extracted: string }>;
+    `).all(userId, conversationId) as Array<{ id: string; name: string; extracted: string }>;
     for (const d of docs) {
+      if (withChunks.has(d.id)) continue;
       blocks.push({
         id: `doc_${d.id}`,
         kind: 'userdoc',
@@ -219,6 +276,7 @@ export async function retrieveForChat(query: string, userId: string | null, limi
         meta: 'Documento privado aportado por el usuario',
         score: 0.4,
         documentId: d.id,
+        documentName: d.name,
       });
     }
   }
@@ -244,5 +302,11 @@ export function citationFor(block: RetrievedBlock, index: number) {
     articleNumber: block.articleNumber ?? null,
     official: block.official ?? null,
     publishedAt: block.publishedAt ?? null,
+    documentId: block.documentId ?? null,
+    documentName: block.documentName ?? null,
+    page: block.page ?? null,
+    charOffset: block.charOffset ?? null,
+    section: block.section ?? null,
+    chunkIndex: block.chunkIndex ?? null,
   };
 }

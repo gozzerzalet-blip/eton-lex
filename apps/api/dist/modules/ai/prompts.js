@@ -61,7 +61,7 @@ ${ctx.hasLibrary || ctx.hasWeb
 - **BIBLIOTECA ETON LEX**: textos y metadatos del catálogo propio.
 - **WEB EXTERNA · OFICIAL**: páginas de organismos del Estado peruano o internacionales, leídas en esta consulta.
 - **WEB EXTERNA**: otras páginas leídas en esta consulta.
-- **DOCUMENTO DEL USUARIO**: archivo aportado por el usuario.
+- **DOCUMENTO DEL USUARIO**: archivo aportado por el usuario. Cuando su etiqueta indique página o sección, inclúyela junto al marcador (por ejemplo, «[F3], pág. 4, sección CAPÍTULO II»). Ese dato sale del archivo original; no lo inventes si no aparece.
 
 Cita con [F#] solo fuentes que aparezcan en el contexto. Si una afirmación no está respaldada por ninguna, dilo o márcala como conocimiento general sin verificación.
 - **No fuerces una cita.** Un bloque que no responde a la pregunta se ignora: es peor una cita irrelevante que ninguna cita. Nunca uses un artículo solo porque comparte una palabra con la consulta.
@@ -106,7 +106,9 @@ export function buildContextBlock(blocks, opts = {}) {
             ? `WEB EXTERNA${b.official ? ' · OFICIAL' : ''}`
             : b.kind === 'userdoc'
                 ? 'DOCUMENTO DEL USUARIO'
-                : 'BIBLIOTECA ETON LEX';
+                : b.kind === 'tool'
+                    ? 'HERRAMIENTA ETON LEX'
+                    : 'BIBLIOTECA ETON LEX';
         const meta = [
             origin,
             b.meta,

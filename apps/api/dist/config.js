@@ -19,6 +19,21 @@ const int = (v, fallback) => {
 // punto de acceso comunitario sin registro (Pollinations).
 const NO_KEY_PROVIDERS = new Set(['ollama', 'pollinations']);
 /**
+ * Un rol de modelo puede apuntar a un proveedor distinto del principal. Si no
+ * se configura, el rol usa el modelo principal: nunca se anuncia un modelo que
+ * no está realmente conectado.
+ */
+const roleConfig = (prefix) => ({
+    provider: (process.env[`${prefix}_PROVIDER`] ?? '').toLowerCase(),
+    model: process.env[`${prefix}_MODEL`] ?? '',
+    baseUrl: process.env[`${prefix}_BASE_URL`] ?? '',
+    apiKey: process.env[`${prefix}_API_KEY`] ?? '',
+    get configured() {
+        return this.provider !== '' && this.provider !== 'none' && Boolean(this.model)
+            && (NO_KEY_PROVIDERS.has(this.provider) || Boolean(this.apiKey));
+    },
+});
+/**
  * Fuentes públicas predeterminadas de ETON NEWS, todas en español. No requieren
  * clave ni pago y cubren cambios legales, derechos humanos y actualidad mundial.
  * `NEWS_FEEDS` las reemplaza por completo cuando se define.
@@ -49,6 +64,7 @@ export const config = {
         data: dataDir,
         uploads: path.join(dataDir, 'uploads'),
         aiUploads: path.join(dataDir, 'uploads', 'ai'),
+        generated: path.join(dataDir, 'uploads', 'generated'),
         db: process.env.DATABASE_PATH ?? path.join(dataDir, 'eton-lex.db'),
     },
     // Respaldos locales dentro del volumen persistente. En VPS se puede montar
@@ -88,6 +104,14 @@ export const config = {
         libraryBlocks: int(process.env.AI_LIBRARY_BLOCKS, 8),
         get configured() {
             return this.provider !== 'none' && (NO_KEY_PROVIDERS.has(this.provider) || Boolean(this.apiKey));
+        },
+        // Router por capacidad. Con solo opciones gratis, el valor por defecto es
+        // el modelo principal; se pueden separar razonamiento y claridad con
+        // variables de entorno cuando exista un proveedor gratuito distinto.
+        roles: {
+            reasoning: roleConfig('AI_REASONING'),
+            clarity: roleConfig('AI_CLARITY'),
+            vision: roleConfig('AI_VISION'),
         },
     },
     // Investigación web sin API key: búsqueda en DuckDuckGo y lectura de la
@@ -138,7 +162,7 @@ export const config = {
     },
     demoMode: bool(process.env.DEMO_MODE, false),
 };
-for (const dir of [config.paths.data, config.paths.uploads, config.paths.aiUploads, config.backup.dir]) {
+for (const dir of [config.paths.data, config.paths.uploads, config.paths.aiUploads, config.paths.generated, config.backup.dir]) {
     fs.mkdirSync(dir, { recursive: true });
 }
 if (config.isProd && config.jwtSecret.startsWith('dev-only')) {

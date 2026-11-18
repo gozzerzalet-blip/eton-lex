@@ -5,7 +5,7 @@ import { db, tx, uuid } from '../../db/index.js';
 import { safeUnlink } from '../../lib/files.js';
 import { acceptedContactIds, requireAuth } from '../../lib/auth.js';
 import { asyncHandler, badRequest, forbidden, notFound } from '../../lib/http.js';
-import { emitToConversation, emitToUser, joinUserToConversation, notify } from '../../lib/notify.js';
+import { emitToConversation, emitToUser, joinUserToConversation, notify, notifyMessage } from '../../lib/notify.js';
 
 export const messagingRouter = Router();
 messagingRouter.use(requireAuth);
@@ -215,7 +215,7 @@ messagingRouter.post('/conversations/:id/messages', asyncHandler(async (req, res
   for (const uid of memberIds(req.params.id)) {
     if (uid !== req.user!.id) {
       emitToUser(uid, 'conversation:activity', { conversationId: req.params.id });
-      notify(uid, 'message', `Mensaje de ${req.user!.name}`, data.body?.slice(0, 120) ?? 'Te envió un archivo.', '/mensajes');
+      notifyMessage(uid, req.params.id, `Mensaje de ${req.user!.name}`, data.body?.slice(0, 120) ?? 'Te envió un archivo.', '/mensajes');
     }
   }
   res.status(201).json({ message });

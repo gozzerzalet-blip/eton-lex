@@ -1,3 +1,5 @@
+import { updateSocketToken } from './socket';
+
 let accessToken: string | null = null;
 let refreshing: Promise<boolean> | null = null;
 
@@ -31,6 +33,9 @@ async function refresh(): Promise<boolean> {
         if (!res.ok) return false;
         const data = await res.json();
         accessToken = data.accessToken as string;
+        // El socket se autenticó con el token anterior; si se reconecta después
+        // de este refresh necesita presentar el nuevo, no uno expirado.
+        updateSocketToken(accessToken);
         return true;
       } catch {
         return false;
@@ -48,6 +53,7 @@ export async function refreshSession(): Promise<{ accessToken: string; user: unk
     if (!res.ok) return null;
     const data = await res.json();
     accessToken = data.accessToken as string;
+    updateSocketToken(accessToken);
     return data;
   } catch {
     return null;

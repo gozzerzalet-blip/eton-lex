@@ -17,24 +17,65 @@ export function migrate() {
     const legacyUserTable = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'users'").get();
     if (legacyUserTable) {
         const existing = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
+        // Se agregan todas las columnas que el esquema indexa o que el código usa.
+        // Un subconjunto hacía fallar `db.exec(schema)` en bases muy antiguas con
+        // índices sobre `university` u otras columnas de identidad.
         const essential = [
+            ['avatar_url', 'TEXT'],
+            ['university', 'TEXT'],
             ['university_id', 'TEXT'],
             ['campus_id', 'TEXT'],
+            ['university_type', 'TEXT'],
             ['faculty', 'TEXT'],
             ['career', 'TEXT'],
+            ['country', "TEXT DEFAULT 'Perú'"],
+            ['city', 'TEXT'],
+            ['cycle', 'TEXT'],
+            ['bio', 'TEXT'],
             ['cover_url', 'TEXT'],
             ['username', 'TEXT'],
             ['public_id', 'TEXT'],
             ['links', "TEXT NOT NULL DEFAULT '[]'"],
             ['privacy_fields', "TEXT NOT NULL DEFAULT '{}'"],
             ['bubble_colors', "TEXT NOT NULL DEFAULT '{}'"],
+            ['role', "TEXT NOT NULL DEFAULT 'student'"],
+            ['email_verified', 'INTEGER NOT NULL DEFAULT 0'],
+            ['privacy', 'TEXT NOT NULL DEFAULT \'{"profile":"community","activity":"friends"}\''],
+            ['theme', "TEXT NOT NULL DEFAULT 'light'"],
+            ['onboarded', 'INTEGER NOT NULL DEFAULT 0'],
+            ['created_at', 'TEXT'],
+            ['updated_at', 'TEXT'],
+            ['last_seen_at', 'TEXT'],
         ];
         for (const [name, ddl] of essential) {
             if (!existing.has(name))
                 db.exec(`ALTER TABLE users ADD COLUMN ${name} ${ddl}`);
         }
     }
+    // Fase 2: la primera definición del índice FTS de fragmentos declaraba
+    // `chunk_id` como UNINDEXED, lo que impedía limpiarlo al borrar un documento
+    // en cascada. Si se detecta, se retira para que el esquema actual lo recree.
+    const ftsDefinition = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'document_chunks_fts'").get();
+    if (ftsDefinition?.sql?.includes('UNINDEXED')) {
+        db.exec(`
+      DROP TRIGGER IF EXISTS document_chunks_ai;
+      DROP TRIGGER IF EXISTS document_chunks_ad;
+      DROP TRIGGER IF EXISTS document_chunks_au;
+      DROP TABLE IF EXISTS document_chunks_fts;
+    `);
+    }
     db.exec(schema);
+    // Reconstrucción idempotente del índice: si una versión anterior dejó menos
+    // filas que fragmentos, se insertan solo los que faltan.
+    const chunkCount = db.prepare('SELECT COUNT(*) AS n FROM document_chunks').get().n;
+    const ftsCount = db.prepare('SELECT COUNT(*) AS n FROM document_chunks_fts').get().n;
+    if (ftsCount < chunkCount) {
+        db.exec(`
+      INSERT INTO document_chunks_fts(rowid, chunk_id, label, text)
+      SELECT rowid, id, label, text FROM document_chunks
+      WHERE rowid NOT IN (SELECT rowid FROM document_chunks_fts)
+    `);
+    }
     // Migraciones incrementales para bases de datos creadas antes de que el
     // articulado incorporara la estructura jerárquica y el estado por artículo.
     const articleColumns = new Set(db.prepare('PRAGMA table_info(articles)').all().map((c) => c.name));

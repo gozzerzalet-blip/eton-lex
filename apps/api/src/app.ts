@@ -22,6 +22,7 @@ import { notificationsRouter } from './modules/notifications/notifications.route
 import { documentsRouter } from './modules/documents/documents.routes.js';
 import { adminRouter } from './modules/admin/admin.routes.js';
 import { aiRouter } from './modules/ai/ai.routes.js';
+import { tutorRouter } from './modules/ai/tutor.routes.js';
 import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
 import { systemRouter } from './modules/system/system.routes.js';
 import { academicRouter } from './modules/system/academic.routes.js';
@@ -132,6 +133,14 @@ export function createApp() {
     message: { error: { code: 'RATE_LIMIT', message: 'Límite de consultas a ETON AI. Espera un momento.' } },
   }));
 
+  app.use('/api/tutor', rateLimit({
+    windowMs: 60 * 1000,
+    limit: 30,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: { code: 'RATE_LIMIT', message: 'Límite de consultas al tutor. Espera un momento.' } },
+  }));
+
   app.use('/api/academic', academicRouter);
   app.use('/api/auth', authRouter);
   app.use('/api/users', usersRouter);
@@ -144,6 +153,7 @@ export function createApp() {
   app.use('/api/rooms', roomsRouter);
   app.use('/api/notifications', notificationsRouter);
   app.use('/api/ai', aiRouter);
+  app.use('/api/tutor', tutorRouter);
   app.use('/api/dashboard', dashboardRouter);
   app.use('/api/admin', adminRouter);
   app.use('/api/system', systemRouter);

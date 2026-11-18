@@ -7,6 +7,7 @@ import Login from './pages/Login';
 import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import AiChat from './pages/AiChat';
+import Tutor from './pages/Tutor';
 import LibraryPage from './pages/Library';
 import NormDetail from './pages/NormDetail';
 import NewsPage from './pages/News';
@@ -128,6 +129,7 @@ export default function App() {
       >
         <Route index element={<Dashboard />} />
         <Route path="/ai" element={<AiChat />} />
+        <Route path="/tutor" element={<Tutor />} />
         <Route path="/biblioteca" element={<LibraryPage />} />
         <Route path="/biblioteca/:slug" element={<NormDetail />} />
         <Route path="/noticias" element={<NewsPage />} />

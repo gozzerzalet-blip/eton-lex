@@ -49,3 +49,22 @@ export function notify(
   emitToUser(userId, 'notification:new', row);
   return row;
 }
+
+/**
+ * Aviso de mensaje que respeta el «silenciar conversación» de cada miembro.
+ * El mensaje llega igual; solo se suprime la notificación. Este es el punto
+ * central para que el futuro Web Push herede la misma preferencia.
+ */
+export function notifyMessage(
+  userId: string,
+  conversationId: string,
+  title: string,
+  body?: string | null,
+  link?: string | null,
+  priority: 'normal' | 'high' = 'normal',
+) {
+  const member = db.prepare('SELECT muted FROM conversation_members WHERE conversation_id = ? AND user_id = ?')
+    .get(conversationId, userId) as { muted: number } | undefined;
+  if (member?.muted) return null;
+  return notify(userId, 'message', title, body, link, priority);
+}

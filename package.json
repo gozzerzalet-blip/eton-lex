@@ -15,6 +15,7 @@
     "start": "npm --workspace apps/api run start",
     "start:production": "node apps/api/dist/db/migrate.js && node apps/api/dist/db/seed.js && node apps/api/dist/scripts/import-corpus.js && node apps/api/dist/server.js",
     "db:migrate": "npm --workspace apps/api run db:migrate",
+    "db:restore": "npm --workspace apps/api run db:restore --",
     "db:seed": "npm --workspace apps/api run db:seed",
     "db:migrate:prod": "node apps/api/dist/db/migrate.js",
     "db:seed:prod": "node apps/api/dist/db/seed.js",

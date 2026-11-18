@@ -3,7 +3,7 @@
 Este documento es la fuente de verdad del avance por fases. Se actualiza al
 terminar **cada fase**, con pruebas reales ejecutadas, no con intenciones.
 
-Última actualización: **2026-11-18 — Fase 2 completada**.
+Última actualización: **2026-11-18 — Fase 5 completada**.
 
 ## Decisiones vigentes
 
@@ -22,9 +22,9 @@ terminar **cada fase**, con pruebas reales ejecutadas, no con intenciones.
 | **0 — Blindaje** | ✅ Completada | Aislamiento de documentos IA por conversación; token del socket actualizado tras refresh; `muted` suprime notificaciones; limpieza de `activeCalls` al desconectar; trigger FTS `news_au`; restore seguro; migración idempotente probada. | Nada. |
 | **1 — Motor IA híbrido** | ✅ Completada | Router por capacidad honesto, síntesis de uno o dos pasos según modelo configurado, 3 tools ejecutadas en backend, verificación reforzada, `ai_usage`, `/api/ai/status` ampliado sin romper el SSE. | Nada; listo para activar roles gratuitos con variables de entorno. |
 | **2 — Documentos extensos** | ✅ Completada | Extracción con páginas y secciones reales, `document_chunks` con `page`/`char_offset`/`section`, FTS5 por fragmento, citas precisas en el SSE, subida HTTP probada y migración de índices antiguos. | OCR solo con proveedor real; no se activa sin servicio configurado. |
-| **3 — Word/PowerPoint/Excel** | ⏳ Siguiente | — | Generación real en backend; sin PDF, como se pidió. |
+| **3 — Word/PowerPoint/Excel** | ✅ Completada | DOCX, PPTX y XLSX OOXML reales generados en backend; descarga, listado, borrado y aislamiento por usuario probados por HTTP; botones de exportación conectados a la última respuesta en ETON AI. | Sin PDF, como se pidió. |
 | **4 — Voz en tiempo real** | ⏸️ Diferida por decisión del usuario | — | Requiere STT/TTS real; la Web Speech API actual no se presenta como voz de proveedor. |
-| **5 — Tutor y evaluación** | ⏳ Pendiente | — | `tutor_sessions` / `tutor_questions` / `tutor_attempts`. |
+| **5 — Tutor y evaluación** | ✅ Completada | Preguntas de completación construidas desde artículos vigentes o fragmentos de documentos propios; respuesta correcta oculta hasta responder; preguntas, intentos, progreso, resultado y borrado reales por HTTP con aislamiento por usuario. | Sin proveedor IA: funciona aunque `AI_PROVIDER=none`. |
 | **6 — Video** | ⏸️ Diferida por decisión del usuario | — | Solo se activará con API real; sin credenciales se entrega guion, nunca "video generado". |
 | **7 — Memoria, push y UX final** | ⏳ Pendiente | — | `ai_memories`, preferencias de notificación, Web Push VAPID, selector cromático y continuidad. |
 
@@ -143,6 +143,46 @@ terminar **cada fase**, con pruebas reales ejecutadas, no con intenciones.
 - `apps/api/src/tests/phase2.test.ts`: integra los tres probes al script
   `test`.
 
+## Detalle de la Fase 3
+
+### Cambios aplicados
+
+- Dependencias libres reales añadidas solo al backend: `docx`, `pptxgenjs` y
+  `exceljs`. El frontend no recibe claves ni librerías de generación.
+- `apps/api/src/config.ts`: `paths.generated` apunta a
+  `DATA_DIR/uploads/generated`; el directorio se crea al arrancar y el backup
+  existente ya lo incluye porque copia `uploads` completo.
+- `apps/api/src/db/schema.sql`: tabla aditiva `generated_files` con
+  `user_id`, `conversation_id`, `kind`, `name`, `mime`, `path`, `size` e
+  índice por usuario. La ruta absoluta nunca se devuelve al cliente.
+- `apps/api/src/modules/ai/generate.ts`: genera DOCX con `docx`, PPTX con
+  `pptxgenjs` y XLSX con `exceljs`. Los tres son paquetes OOXML válidos; no se
+  renombran archivos de texto ni se produce PDF. Los nombres se normalizan sin
+  acentos ni caracteres peligrosos.
+- `apps/api/src/modules/ai/ai.routes.ts`: `POST /api/ai/generated` acepta
+  título, secciones, columnas/filas y opcionalmente `conversationId`; si solo se
+  envía la conversación, usa la **última respuesta real guardada** en
+  `ai_messages`. `GET /api/ai/generated`, `GET /api/ai/generated/:id/download`
+  y `DELETE /api/ai/generated/:id` completan el ciclo. Toda consulta filtra por
+  `user_id`; el borrado elimina primero el archivo en disco.
+- `/api/ai/status` expone `exports` con los tres formatos habilitados, para que
+  la interfaz no muestre botones decorativos si el backend no los soporta.
+- `apps/web/src/pages/AiChat.tsx`: tres botones reales junto al selector de
+  modo exportan la respuesta de la conversación activa a Word, PowerPoint o
+  Excel, descargan el archivo desde `/api/ai/generated/:id/download` y avisan
+  con un toast real. Quedan desactivados mientras no exista una respuesta.
+
+### Pruebas añadidas
+
+- `apps/api/src/tests/phase3-probe.ts`: comprueba la firma ZIP/OOXML de los
+  tres formatos, lee el DOCX de vuelta con `mammoth`, carga el XLSX con
+  `exceljs`, verifica hojas/celdas reales y valida `safeFileName`.
+- `apps/api/src/tests/ai-generate-probe.ts`: levanta la API con base temporal,
+  genera desde una conversación real, descarga con `Content-Type` y
+  `Content-Disposition`, comprueba que otro usuario recibe 404 y confirma que
+  `DELETE` retira archivo y fila.
+- `apps/api/src/tests/phase3.test.ts`: integra ambos probes al script `test`.
+
 ## Comandos
 
 ```bash
@@ -157,8 +197,8 @@ npm run db:restore -- <directorio-del-respaldo> --confirm
 ## Pruebas ejecutadas (resultado real)
 
 - `npm run typecheck`: OK.
-- `npm --workspace apps/api run test`: **17/17 pruebas OK**
-  (9 de humo + 2 de Fase 0 + 3 de Fase 1 + 3 de Fase 2).
+- `npm --workspace apps/api run test`: **20/20 pruebas OK**
+  (9 de humo + 2 de Fase 0 + 3 de Fase 1 + 3 de Fase 2 + 2 de Fase 3 + 1 de Fase 5).
   - Migración ejecutada dos veces sobre una base temporal: sin errores, los
     9 triggers FTS existen una sola vez, `schema_meta` no se duplica.
   - Dos documentos de IA del mismo usuario en conversaciones distintas: cada
@@ -182,11 +222,75 @@ npm run db:restore -- <directorio-del-respaldo> --confirm
     cita `page`, `section`, `charOffset` y `documentId` reales.
   - Migración legacy: base con FTS `UNINDEXED` se reindexa, mantiene 3 triggers
     únicos, sobrevive a una segunda migración y limpia el índice al borrar.
-- `npm run build`: OK (`index-C6wphhlr.js`, `index-CJgOui3-.css`).
-- `npm run backup`: OK (`2026-11-18T19-14-39-113Z`), 36 usuarios y 27 normas,
-  uploads incluidos.
+  - Exportación: DOCX de 10.054 bytes, PPTX de 64.117 bytes y XLSX de 7.575
+    bytes; el DOCX vuelve a leerse con su título y su tabla; el XLSX vuelve a
+    cargarse con dos hojas, encabezado `Tema | Norma` y dos filas reales.
+  - HTTP de generados: `/api/ai/status` anuncia los 3 formatos; la descarga
+    devuelve el MIME correcto y el mismo tamaño guardado; otro usuario recibe
+    404; el borrado retira el archivo del disco y la descarga posterior falla.
+  - Tutor: la sesión pública no contiene `correctIndex`, `explanation` ni
+    `sourceText`; las frases se comprueban literalmente contra la base; una
+    respuesta correcta y una incorrecta producen feedback distinto; la sesión
+    termina y el resultado revela todas las fuentes; otro usuario recibe 404;
+    el borrado deja cero preguntas e intentos.
+- `npm run build`: OK (`index-DUsj9Fxq.js`, `index-ceP4-9cu.css`).
+- `npm run backup`: OK (`2026-11-18T20-14-55-852Z`), 36 usuarios y 27 normas,
+  uploads —incluidos generados— incluidos.
 - `npm run db:restore -- … --dry-run`: OK, integridad `ok`, 36 usuarios y
   27 normas, sin escribir archivos.
+
+## Detalle de la Fase 5
+
+### Cambios aplicados
+
+- `apps/api/src/db/schema.sql`: tablas aditivas `tutor_sessions`,
+  `tutor_questions` y `tutor_attempts`, con índices por usuario y sesión,
+  unicidad de un intento por pregunta y borrado en cascada. El `document_id`
+  referencia `ai_documents` con `ON DELETE SET NULL`, así que borrar un
+  documento no destruye el historial de práctica.
+- `apps/api/src/modules/ai/tutor.ts`: construye preguntas de completación con
+  frases literales de `articles` vigentes o de `document_chunks` /
+  `ai_documents.extracted` del propio usuario. Las opciones incorrectas son
+  palabras reales de otras fuentes de la misma sesión, nunca texto inventado.
+  Si no hay suficiente texto verificable, devuelve cero preguntas y la API lo
+  informa. `publicQuestion()` oculta `correctIndex`, `explanation` y
+  `sourceText`; `revealQuestion()` solo se usa al responder o ver resultados.
+- `apps/api/src/modules/ai/tutor.routes.ts`: `GET /api/tutor/areas`,
+  `POST /api/tutor/sessions`, `GET /api/tutor/sessions`,
+  `GET /api/tutor/sessions/:id`, `POST /api/tutor/sessions/:id/answers`,
+  `GET /api/tutor/sessions/:id/result` y `DELETE /api/tutor/sessions/:id`.
+  Toda consulta filtra por `user_id`; no se puede responder dos veces la misma
+  pregunta y la sesión se marca `completed` al responder la última.
+- `apps/api/src/app.ts`: router montado bajo `/api/tutor` con límite propio de
+  30 peticiones por minuto, sin tocar el límite ni el contrato SSE de ETON AI.
+- `apps/web/src/pages/Tutor.tsx`: página real con filtros por área, tema y
+  documento propio; muestra la pregunta, registra la respuesta, revela la
+  explicación con su cita consultable, avanza solo cuando el estudiante lo pide
+  y ofrece el resultado final con el texto de origen de cada respuesta.
+- `CitationList` se exporta desde `AiChat.tsx` para reutilizar las mismas
+  citas de la biblioteca; `/tutor` se registra en `App.tsx` y en el menú,
+  móvil y buscador de `Layout.tsx`.
+
+### Pruebas añadidas
+
+- `apps/api/src/tests/tutor-probe.ts`: base temporal con seis artículos y un
+  documento con fragmento paginado; verifica por HTTP que la respuesta pública
+  no filtre la correcta, que cada frase exista literalmente en la base, que
+  acertar y fallar devuelva feedback real, que la sesión se complete, que el
+  resultado revele fuentes, que otro usuario reciba 404 y que el borrado limpie
+  preguntas e intentos.
+- `apps/api/src/tests/phase5.test.ts`: integra el probe al script `test`.
+
+## Publicación y despliegue
+
+- `npm run deploy:check -- --url https://a7yp4cd07ujg-production-zay69hs2.us-central1.suga.run`:
+  OK. La URL pública sigue respondiendo health, HTTPS, SEO básico y PWA; IA no
+  configurada, correo configurado, demo desactivada.
+- **Bloqueo operativo:** el entorno local no tiene `git` ni `gh`, y el flujo web
+  de GitHub devuelve 404 en `commit_upload_manifest`, así que no se creó commit.
+  El último commit remoto continúa siendo `d49a793`. Por eso los cambios de
+  Fases 0 a 5 están verificados localmente pero **todavía no desplegados**. No
+  se reintentará una carga parcial que pueda dejar el repositorio a medias.
 
 ## Reglas que se mantienen en todas las fases
 

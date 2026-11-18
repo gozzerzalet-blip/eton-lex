@@ -30,12 +30,14 @@ export function providerInfo(): ProviderInfo {
   };
 }
 
-type Target = {
+export type Target = {
   provider: string;
   model: string;
   baseUrl: string;
   apiKey: string;
 };
+
+export type UsageInfo = Record<string, unknown>;
 
 function primary(): Target {
   return {
@@ -141,12 +143,16 @@ function assertConfigured() {
   }
 }
 
-export async function* streamChat(messages: ChatMessage[], signal?: AbortSignal): AsyncGenerator<string> {
+export async function* streamChat(
+  messages: ChatMessage[],
+  signal?: AbortSignal,
+  onUsage?: (usage: UsageInfo) => void,
+): AsyncGenerator<string> {
   assertConfigured();
   const main = primary();
   let emitted = false;
   try {
-    for await (const delta of streamWith(main, messages, signal)) {
+    for await (const delta of streamChatWith(main, messages, signal, onUsage)) {
       emitted = true;
       yield delta;
     }
@@ -157,23 +163,43 @@ export async function* streamChat(messages: ChatMessage[], signal?: AbortSignal)
     console.warn(
       `[ai] proveedor ${main.provider} falló (${(err as Error).message}); se usa el respaldo ${config.ai.fallback.provider}.`,
     );
-    for await (const delta of streamWith(fallback(), messages, signal)) yield delta;
+    for await (const delta of streamChatWith(fallback(), messages, signal, onUsage)) yield delta;
   }
 }
 
-async function* streamWith(t: Target, messages: ChatMessage[], signal?: AbortSignal): AsyncGenerator<string> {
+/** Transmite usando un destino concreto (lo usa el router por capacidad). */
+export async function* streamChatWith(
+  t: Target,
+  messages: ChatMessage[],
+  signal?: AbortSignal,
+  onUsage?: (usage: UsageInfo) => void,
+): AsyncGenerator<string> {
   if (t.provider === 'anthropic') {
-    yield* streamAnthropic(t, messages, signal);
+    yield* streamAnthropic(t, messages, signal, onUsage);
     return;
   }
   if (t.provider === 'google') {
-    yield* streamGoogle(t, messages, signal);
+    yield* streamGoogle(t, messages, signal, onUsage);
     return;
   }
-  yield* streamOpenAI(t, messages, signal);
+  yield* streamOpenAI(t, messages, signal, onUsage);
 }
 
-async function* streamOpenAI(t: Target, messages: ChatMessage[], signal?: AbortSignal): AsyncGenerator<string> {
+/** Paso de razonamiento: acumula la salida sin emitirla al usuario todavía. */
+export async function completeChat(
+  t: Target,
+  messages: ChatMessage[],
+  signal?: AbortSignal,
+): Promise<{ text: string; usage: UsageInfo | null }> {
+  let text = '';
+  let usage: UsageInfo | null = null;
+  for await (const delta of streamChatWith(t, messages, signal, (u) => { usage = u; })) {
+    text += delta;
+  }
+  return { text, usage };
+}
+
+async function* streamOpenAI(t: Target, messages: ChatMessage[], signal?: AbortSignal, onUsage?: (usage: UsageInfo) => void): AsyncGenerator<string> {
   const body = {
     model: t.model,
     stream: true,
@@ -205,7 +231,8 @@ async function* streamOpenAI(t: Target, messages: ChatMessage[], signal?: AbortS
 
   for await (const data of sseLines(res)) {
     try {
-      const json = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
+      const json = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }>; usage?: UsageInfo };
+      if (json.usage) onUsage?.(json.usage);
       const delta = json.choices?.[0]?.delta?.content;
       if (delta) yield delta;
     } catch {
@@ -214,7 +241,7 @@ async function* streamOpenAI(t: Target, messages: ChatMessage[], signal?: AbortS
   }
 }
 
-async function* streamAnthropic(t: Target, messages: ChatMessage[], signal?: AbortSignal): AsyncGenerator<string> {
+async function* streamAnthropic(t: Target, messages: ChatMessage[], signal?: AbortSignal, onUsage?: (usage: UsageInfo) => void): AsyncGenerator<string> {
   const system = messages.filter((m) => m.role === 'system').map((m) => textOf(m.content)).join('\n\n');
   const rest = messages.filter((m) => m.role !== 'system');
   const body = {
@@ -249,7 +276,8 @@ async function* streamAnthropic(t: Target, messages: ChatMessage[], signal?: Abo
 
   for await (const data of sseLines(res)) {
     try {
-      const json = JSON.parse(data) as { type?: string; delta?: { type?: string; text?: string } };
+      const json = JSON.parse(data) as { type?: string; delta?: { type?: string; text?: string }; usage?: UsageInfo };
+      if (json.usage) onUsage?.(json.usage);
       if (json.type === 'content_block_delta' && json.delta?.type === 'text_delta' && json.delta.text) {
         yield json.delta.text;
       }
@@ -259,7 +287,7 @@ async function* streamAnthropic(t: Target, messages: ChatMessage[], signal?: Abo
   }
 }
 
-async function* streamGoogle(t: Target, messages: ChatMessage[], signal?: AbortSignal): AsyncGenerator<string> {
+async function* streamGoogle(t: Target, messages: ChatMessage[], signal?: AbortSignal, onUsage?: (usage: UsageInfo) => void): AsyncGenerator<string> {
   const system = messages.filter((m) => m.role === 'system').map((m) => textOf(m.content)).join('\n\n');
   const contents = messages
     .filter((m) => m.role !== 'system')
@@ -289,7 +317,8 @@ async function* streamGoogle(t: Target, messages: ChatMessage[], signal?: AbortS
 
   for await (const data of sseLines(res)) {
     try {
-      const json = JSON.parse(data) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+      const json = JSON.parse(data) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>; usageMetadata?: UsageInfo };
+      if (json.usageMetadata) onUsage?.(json.usageMetadata);
       const text = json.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('') ?? '';
       if (text) yield text;
     } catch {

@@ -1,16 +1,22 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { Router } from 'express';
 import { z } from 'zod';
 import { config } from '../../config.js';
 import { db, uuid } from '../../db/index.js';
 import { requireAuth } from '../../lib/auth.js';
-import { fileBase64, safeUnlink, uploader, extractText } from '../../lib/files.js';
+import { fileBase64, safeUnlink, uploader, extractDocument, chunkDocument } from '../../lib/files.js';
 import { ApiError, asyncHandler, badRequest, forbidden, notFound } from '../../lib/http.js';
 import { buildContextBlock, buildSystemPrompt, MODE_LABEL, type AiMode } from './prompts.js';
-import { providerInfo, streamChat, type ChatMessage, type Part } from './providers.js';
-import { citationFor, retrieveForChat, type RetrievedBlock } from './retrieval.js';
+import { providerInfo, type ChatMessage, type Part, type UsageInfo } from './providers.js';
+import { citationFor, type RetrievedBlock } from './retrieval.js';
 import { classifyIntent, expandFollowUp } from './intent.js';
 import { researchWeb, type WebSource } from './web.js';
+import { route, routerStatus, type ModelRole } from './router.js';
+import { synthesize } from './synthesizer.js';
+import { runLegalTools } from './tools.js';
+import { verifyAnswer } from './verify.js';
+import { generateDocument, safeFileName, type GeneratedKind } from './generate.js';
 
 export const aiRouter = Router();
 aiRouter.use(requireAuth);
@@ -176,55 +182,33 @@ function buildLibraryAnswer(query: string, blocks: RetrievedBlock[], web: Retrie
   return out.join('\n');
 }
 
-/**
- * El modelo puede mencionar artículos que no están en las fuentes entregadas.
- * No se reescribe su texto: se detecta y se avisa de forma visible para que
- * ninguna cita quede presentada como verificada sin serlo.
- */
-function unverifiedArticleRefs(answer: string, blocks: RetrievedBlock[]): string[] {
-  const known = new Set<string>();
-  for (const b of blocks) {
-    if (b.articleNumber) known.add(String(b.articleNumber).toUpperCase());
-    const source = foldText(`${b.label} ${b.meta} ${b.text}`);
-    for (const m of source.matchAll(/art(?:iculo|s?\.?)\s*(\d{1,4})/g)) known.add(m[1]);
+/** Registro de consumo real; nunca se estima un coste que no conocemos. */
+function recordUsage(entry: {
+  userId: string;
+  conversationId: string;
+  role: ModelRole | 'single' | 'biblioteca';
+  provider: string;
+  model: string;
+  promptChars: number;
+  completionChars: number;
+  usage?: UsageInfo | null;
+  latencyMs: number;
+  ok: boolean;
+  error?: string;
+}) {
+  try {
+    db.prepare(`
+      INSERT INTO ai_usage (id, user_id, conversation_id, role, provider, model,
+        prompt_chars, completion_chars, usage_json, latency_ms, ok, error)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      uuid(), entry.userId, entry.conversationId, entry.role, entry.provider, entry.model,
+      entry.promptChars, entry.completionChars, entry.usage ? JSON.stringify(entry.usage) : null,
+      entry.latencyMs, entry.ok ? 1 : 0, entry.error ?? null,
+    );
+  } catch (err) {
+    console.warn('[ai] no se pudo registrar ai_usage:', (err as Error).message);
   }
-  const cited = new Set<string>();
-  for (const m of answer.matchAll(/\bart(?:[ií]culo|s?\.?)\s*(\d{1,4})/gi)) cited.add(m[1]);
-  return [...cited].filter((n) => !known.has(n) && !known.has(`${n}A`)).sort((a, b) => Number(a) - Number(b));
-}
-
-/** Normaliza para comparar texto legal: sin tildes, signos ni espacios de más. */
-function normalizeForMatch(input: string): string {
-  return input
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
-
-/**
- * Detecta frases entrecomilladas que no aparecen en las fuentes. Un modelo
- * puede inventar una cita textual aunque no invente el número de artículo; se
- * compara el arranque de la cita con el texto disponible y, si no coincide, se
- * advierte en la respuesta en lugar de dejar pasar una cita falsa.
- */
-function unverifiedQuotes(answer: string, blocks: RetrievedBlock[]): string[] {
-  const corpus = normalizeForMatch(blocks.map((b) => `${b.text} ${b.meta}`).join(' '));
-  if (!corpus) return [];
-  const quotes = new Set<string>();
-  for (const m of answer.matchAll(/[“"«]([^”"»]{25,400})[”"»]/g)) quotes.add(m[1].trim());
-  const bad: string[] = [];
-  for (const q of quotes) {
-    const norm = normalizeForMatch(q);
-    if (norm.length < 20) continue;
-    // Se compara el comienzo: tolera cortes, puntos suspensivos o el final
-    // reformulado, pero no una frase que no existe en la fuente.
-    if (!corpus.includes(norm.slice(0, 60))) {
-      bad.push(q.length > 90 ? `${q.slice(0, 90)}…` : q);
-    }
-  }
-  return bad;
 }
 
 /** Números de ley citados que no aparecen en ninguna fuente del contexto. */
@@ -263,7 +247,18 @@ function stripUnlinkedSources(answer: string): string {
 aiRouter.get('/status', asyncHandler(async (_req, res) => {
   res.json({
     ...providerInfo(),
+    router: routerStatus(),
+    tools: [
+      { name: 'search_library', enabled: true, detail: 'Recuperación en biblioteca, noticias y documentos de la conversación.' },
+      { name: 'open_official_source', enabled: true, detail: 'Consulta al catálogo de normas e investigación web oficial.' },
+      { name: 'calculate_deadline', enabled: true, detail: 'Cómputo orientativo de plazos; no sustituye la norma procesal aplicable.' },
+    ],
     modes: MODES.map((m) => ({ id: m, label: MODE_LABEL[m] })),
+    exports: [
+      { kind: 'docx', label: 'Word', enabled: true },
+      { kind: 'pptx', label: 'PowerPoint', enabled: true },
+      { kind: 'xlsx', label: 'Excel', enabled: true },
+    ],
     voice: { input: 'Web Speech API (navegador)', output: 'Speech Synthesis (navegador)' },
     research: {
       web: config.webResearch.enabled,
@@ -345,6 +340,15 @@ aiRouter.post('/conversations/:id/messages', asyncHandler(async (req, res) => {
         .all(req.user!.id, ...data.attachmentIds) as any[]
     : [];
 
+  // Un archivo recién subido no tiene conversación todavía. Al adjuntarlo se
+  // asocia a esta conversación: así el seguimiento lo recupera sin volver a
+  // cargarlo, pero nunca aparece en otras conversaciones del usuario.
+  const unbound = docs.filter((d) => !d.conversation_id).map((d) => d.id);
+  if (unbound.length) {
+    const mark = db.prepare('UPDATE ai_documents SET conversation_id = ? WHERE id = ? AND user_id = ? AND conversation_id IS NULL');
+    for (const id of unbound) mark.run(conv.id, id, req.user!.id);
+  }
+
   const textParts: string[] = [];
   const imageParts: Part[] = [];
   for (const doc of docs) {
@@ -369,7 +373,8 @@ aiRouter.post('/conversations/:id/messages', asyncHandler(async (req, res) => {
   const query = userContent || 'documento adjunto';
   const plan = classifyIntent(query, history);
   const retrievalQuery = plan.kind === 'seguimiento' ? expandFollowUp(query, history) : query;
-  const retrieved = await retrieveForChat(retrievalQuery, req.user!.id, Math.max(8, config.ai.libraryBlocks));
+  const toolsOutcome = await runLegalTools(retrievalQuery, req.user!.id, conv.id, Math.max(8, config.ai.libraryBlocks));
+  const retrieved = toolsOutcome.library;
 
   // El artículo exacto («artículo 920 del Código Civil») debe ir primero; la
   // búsqueda FTS sola devuelve artículos que comparten palabras, no el pedido.
@@ -390,9 +395,9 @@ aiRouter.post('/conversations/:id/messages', asyncHandler(async (req, res) => {
     ? retrieved.filter((b) => b.kind !== 'article' && b.normId && exactNormIds.has(b.normId))
     : retrieved;
   const seenLibrary = new Set<string>();
-  const libraryBlocks = [...exact, ...rest]
+  const libraryBlocks = [...exact, ...rest, ...toolsOutcome.blocks]
     .filter((b) => (seenLibrary.has(b.id) ? false : (seenLibrary.add(b.id), true)))
-    .slice(0, config.ai.libraryBlocks);
+    .slice(0, config.ai.libraryBlocks + toolsOutcome.blocks.length);
 
   const webEnabled = config.webResearch.enabled && plan.useWeb && Boolean(userContent.trim());
 
@@ -443,6 +448,7 @@ aiRouter.post('/conversations/:id/messages', asyncHandler(async (req, res) => {
     mode,
     libraryMode: !providerInfo().configured,
     plan: planPayload,
+    tools: toolsOutcome.runs,
     web: { status: webEnabled ? 'searching' : 'off', enabled: config.webResearch.enabled, engine: 'duckduckgo' },
     citations: libraryBlocks.map(citationFor),
     retrieval: libraryBlocks.map((b) => ({ kind: b.kind, label: b.label })),
@@ -477,6 +483,7 @@ aiRouter.post('/conversations/:id/messages', asyncHandler(async (req, res) => {
       mode: 'biblioteca',
       libraryMode: true,
       plan: planPayload,
+      tools: toolsOutcome.runs,
       web: web ? { status: web.sources.length > 0 ? 'done' : 'empty', results: web.sources.length, errors: web.errors, tookMs: web.tookMs } : { status: 'off' },
       citations,
       retrieval: allBlocks.map((b) => ({ kind: b.kind, label: b.label })),
@@ -498,6 +505,17 @@ aiRouter.post('/conversations/:id/messages', asyncHandler(async (req, res) => {
       Date.now() - started,
     );
     db.prepare("UPDATE ai_conversations SET updated_at = datetime('now') WHERE id = ?").run(conv.id);
+    recordUsage({
+      userId: req.user!.id,
+      conversationId: conv.id,
+      role: 'biblioteca',
+      provider: 'none',
+      model: 'biblioteca',
+      promptChars: query.length,
+      completionChars: answer.length,
+      latencyMs: Date.now() - started,
+      ok: true,
+    });
     send('done', {
       id: assistantId,
       content: answer,
@@ -538,6 +556,7 @@ aiRouter.post('/conversations/:id/messages', asyncHandler(async (req, res) => {
       userMessageId,
       mode,
       plan: planPayload,
+      tools: toolsOutcome.runs,
       web: web
         ? {
             status: web.sources.length > 0 ? 'done' : 'empty',
@@ -550,27 +569,64 @@ aiRouter.post('/conversations/:id/messages', asyncHandler(async (req, res) => {
       retrieval: allBlocks.map((b) => ({ kind: b.kind, label: b.label })),
     });
 
-    for await (const delta of streamChat(messages, controller.signal)) {
-      full += delta;
-      send('delta', { text: delta });
-    }
+    // El sintetizador usa modelos distintos solo si el router los tiene
+    // configurados. Cada etapa se anuncia por SSE con el modelo realmente usado.
+    const synthesis = await synthesize({
+      messages,
+      signal: controller.signal,
+      onStage: (stage, message) => {
+        const choice = route(stage === 'reasoning' ? 'reasoning' : 'clarity');
+        send('status', { stage, message, model: choice.label });
+      },
+      emitDelta: (delta) => {
+        full += delta;
+        send('delta', { text: delta });
+      },
+    });
 
     // Control de veracidad: se evalúa únicamente el texto generado por el
     // modelo, antes de añadir advertencias, para que un aviso no dispare otro.
     const modelAnswer = full;
-    const unsupported = unverifiedArticleRefs(modelAnswer, allBlocks);
-    if (unsupported.length > 0) {
-      const note = `\n\n---\n\n> ⚠️ **Verificación automática:** esta respuesta menciona el artículo ${unsupported.join(', artículo ')} sin que ese texto conste en las fuentes consultadas. Confírmalo en el diario oficial o en el SPIJ antes de usarlo.`;
+    const verification = verifyAnswer(full, allBlocks);
+    full = verification.text;
+    for (const note of verification.warnings) {
       full += note;
       send('delta', { text: note });
     }
 
-    const fakeQuotes = unverifiedQuotes(modelAnswer, allBlocks);
-    if (fakeQuotes.length > 0) {
-      const list = fakeQuotes.map((q) => `«${q}»`).join('; ');
-      const note = `\n\n> ⚠️ **Cita textual no verificada:** ${list} no aparece literalmente en las fuentes consultadas. Puede ser una paráfrasis del modelo: no la uses como texto legal.`;
-      full += note;
-      send('delta', { text: note });
+    const promptChars = messages.reduce(
+      (sum, m) => sum + (typeof m.content === 'string' ? m.content.length : m.content.reduce((s, p) => s + (p.type === 'text' ? p.text.length : p.dataBase64.length), 0)),
+      0,
+    );
+    if (synthesis.usage.length === 0) {
+      const choice = route('clarity');
+      recordUsage({
+        userId: req.user!.id,
+        conversationId: conv.id,
+        role: 'single',
+        provider: choice.target.provider,
+        model: choice.target.model,
+        promptChars,
+        completionChars: synthesis.text.length,
+        latencyMs: Date.now() - started,
+        ok: true,
+      });
+    } else {
+      for (const entry of synthesis.usage) {
+        const choice = route(entry.role);
+        recordUsage({
+          userId: req.user!.id,
+          conversationId: conv.id,
+          role: entry.role,
+          provider: choice.target.provider,
+          model: choice.target.model,
+          promptChars,
+          completionChars: synthesis.text.length,
+          usage: entry.info,
+          latencyMs: Date.now() - started,
+          ok: true,
+        });
+      }
     }
 
     const inventedLaws = unverifiedLawRefs(modelAnswer, allBlocks);
@@ -603,12 +659,32 @@ aiRouter.post('/conversations/:id/messages', asyncHandler(async (req, res) => {
       assistantId, conv.id, full,
       JSON.stringify(citations),
       JSON.stringify(allBlocks.map((b) => ({ label: b.label, url: b.url, kind: b.kind }))),
-      config.ai.model, Date.now() - started,
+      synthesis.roles.map((r) => route(r).label).join(' → '), Date.now() - started,
     );
     db.prepare("UPDATE ai_conversations SET updated_at = datetime('now') WHERE id = ?").run(conv.id);
-    send('done', { id: assistantId, content: full, citations, latencyMs: Date.now() - started });
+    send('done', {
+      id: assistantId,
+      content: full,
+      citations,
+      latencyMs: Date.now() - started,
+      roles: synthesis.roles,
+      verification: verification.checks,
+    });
   } catch (err) {
     const message = err instanceof ApiError ? err.message : (err as Error).message;
+    const choice = route('clarity');
+    recordUsage({
+      userId: req.user!.id,
+      conversationId: conv.id,
+      role: 'single',
+      provider: choice.target.provider,
+      model: choice.target.model,
+      promptChars: query.length,
+      completionChars: full.length,
+      latencyMs: Date.now() - started,
+      ok: false,
+      error: message.slice(0, 400),
+    });
     send('error', { message: controller.signal.aborted ? 'Respuesta interrumpida.' : message });
   } finally {
     res.end();
@@ -623,19 +699,48 @@ aiRouter.post('/documents', uploader('ai').array('files', 5), asyncHandler(async
 
   const out = [];
   for (const file of files) {
-    const extracted = await extractText(file.path, file.mimetype);
+    const document = await extractDocument(file.path, file.mimetype);
+    const extracted = document?.text ?? null;
     const id = uuid();
+    const name = file.originalname.slice(0, 200);
     db.prepare(`
-      INSERT INTO ai_documents (id, user_id, conversation_id, name, mime, size, path, extracted)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, req.user!.id, conversationId, file.originalname.slice(0, 200), file.mimetype, file.size, file.path, extracted);
+      INSERT INTO ai_documents (id, user_id, conversation_id, name, mime, size, path, extracted, pages)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, req.user!.id, conversationId, name, file.mimetype, file.size, file.path, extracted, document?.pages ?? null);
+
+    // Los fragmentos se calculan una sola vez, al subir el archivo. Cada uno
+    // conserva página, desplazamiento y sección para poder citarse con precisión.
+    const chunks = document ? chunkDocument(document) : [];
+    if (chunks.length > 0) {
+      const insert = db.prepare(`
+        INSERT INTO document_chunks (id, document_id, user_id, conversation_id, chunk_index,
+          page, char_offset, section, label, text, chars)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const chunk of chunks) {
+        insert.run(
+          uuid(), id, req.user!.id, conversationId, chunk.index,
+          chunk.page, chunk.charOffset, chunk.section,
+          name, chunk.text, chunk.text.length,
+        );
+      }
+    }
+
     out.push({
       id,
       name: file.originalname,
       mime: file.mimetype,
       size: file.size,
       extracted: Boolean(extracted),
-      note: extracted ? null : file.mimetype.startsWith('image/') ? 'Se enviará al modelo como imagen.' : 'No se pudo extraer texto de este archivo.',
+      pages: document?.pages ?? null,
+      chunks: chunks.length,
+      note: extracted
+        ? chunks.length > 0
+          ? `${chunks.length} fragmento(s) indexado(s) para citas por página/sección.`
+          : 'Texto extraído; el documento es suficientemente corto y se usa completo.'
+        : file.mimetype.startsWith('image/')
+          ? 'Se enviará al modelo como imagen; no hay OCR configurado que invente texto.'
+          : 'No se pudo extraer texto de este archivo.',
     });
   }
   res.status(201).json({ documents: out });
@@ -649,11 +754,129 @@ aiRouter.get('/documents', asyncHandler(async (req, res) => {
   res.json({ documents: rows });
 }));
 
+aiRouter.get('/documents/:id/chunks', asyncHandler(async (req, res) => {
+  const doc = db.prepare('SELECT id, name, pages FROM ai_documents WHERE id = ? AND user_id = ?')
+    .get(req.params.id, req.user!.id) as any;
+  if (!doc) throw notFound('Documento no encontrado.');
+  const chunks = db.prepare(`
+    SELECT id, chunk_index AS chunkIndex, page, char_offset AS charOffset, section, text, chars
+    FROM document_chunks WHERE document_id = ? AND user_id = ? ORDER BY chunk_index
+  `).all(doc.id, req.user!.id);
+  res.json({ document: { id: doc.id, name: doc.name, pages: doc.pages }, chunks });
+}));
+
 aiRouter.delete('/documents/:id', asyncHandler(async (req, res) => {
   const doc = db.prepare('SELECT * FROM ai_documents WHERE id = ? AND user_id = ?').get(req.params.id, req.user!.id) as any;
   if (!doc) throw notFound('Documento no encontrado.');
   safeUnlink(doc.path);
   db.prepare('DELETE FROM ai_documents WHERE id = ?').run(doc.id);
+  res.json({ ok: true });
+}));
+
+// ── Exportación real (Fase 3): Word, PowerPoint y Excel ────────
+const generatedSchema = z.object({
+  kind: z.enum(['docx', 'pptx', 'xlsx']),
+  title: z.string().trim().min(1).max(160),
+  content: z.string().trim().max(50_000).optional(),
+  sections: z.array(z.object({
+    heading: z.string().trim().max(160).optional(),
+    body: z.string().trim().max(20_000),
+  })).max(60).optional(),
+  conversationId: z.string().uuid().optional(),
+  columns: z.array(z.string().trim().min(1).max(80)).max(30).optional(),
+  rows: z.array(z.union([
+    z.array(z.union([z.string(), z.number()])).max(30),
+    z.record(z.union([z.string(), z.number()])),
+  ])).max(2000).optional(),
+});
+
+aiRouter.post('/generated', asyncHandler(async (req, res) => {
+  const data = generatedSchema.parse(req.body);
+  const sections = data.sections ?? [];
+  let content = data.content?.trim() ?? '';
+  let sourceLabel: string | undefined;
+
+  if (data.conversationId) {
+    const owned = db.prepare('SELECT id, title FROM ai_conversations WHERE id = ? AND user_id = ?')
+      .get(data.conversationId, req.user!.id) as { id: string; title: string } | undefined;
+    if (!owned) throw notFound('Conversación no encontrada.');
+    if (!content) {
+      const last = db.prepare(`
+        SELECT content FROM ai_messages
+        WHERE conversation_id = ? AND role = 'assistant' AND content <> ''
+        ORDER BY created_at DESC LIMIT 1
+      `).get(owned.id) as { content: string } | undefined;
+      content = last?.content?.trim() ?? '';
+      sourceLabel = `Última respuesta de ETON AI · ${owned.title}`;
+    }
+  }
+
+  if (!content && sections.length === 0 && !data.rows?.length) {
+    throw badRequest('Escribe un contenido, añade secciones o elige una conversación con respuesta.');
+  }
+  if (content && sections.length === 0) sections.push({ body: content });
+  else if (content && sections.length > 0 && !sections.some((s) => s.body === content)) {
+    sections.unshift({ body: content });
+  }
+
+  const generated = await generateDocument(data.kind as GeneratedKind, {
+    title: data.title,
+    sections,
+    columns: data.columns,
+    rows: data.rows,
+    sourceLabel,
+  });
+
+  const id = uuid();
+  const storedName = `${id}-${safeFileName(data.title, generated.ext)}`;
+  const fullPath = path.join(config.paths.generated, storedName);
+  await fs.promises.writeFile(fullPath, generated.buffer);
+
+  db.prepare(`
+    INSERT INTO generated_files (id, user_id, conversation_id, kind, name, mime, path, size)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id, req.user!.id, data.conversationId ?? null, generated.ext,
+    safeFileName(data.title, generated.ext), generated.mime, fullPath, generated.buffer.length,
+  );
+
+  res.status(201).json({
+    file: {
+      id,
+      name: safeFileName(data.title, generated.ext),
+      kind: generated.ext,
+      mime: generated.mime,
+      size: generated.buffer.length,
+      downloadUrl: `/api/ai/generated/${id}/download`,
+    },
+  });
+}));
+
+aiRouter.get('/generated', asyncHandler(async (req, res) => {
+  const files = db.prepare(`
+    SELECT id, kind, name, mime, size, conversation_id AS conversationId, created_at AS createdAt
+    FROM generated_files WHERE user_id = ? ORDER BY created_at DESC LIMIT 100
+  `).all(req.user!.id);
+  res.json({ files });
+}));
+
+aiRouter.get('/generated/:id/download', asyncHandler(async (req, res) => {
+  const file = db.prepare('SELECT * FROM generated_files WHERE id = ? AND user_id = ?')
+    .get(req.params.id, req.user!.id) as any;
+  if (!file) throw notFound('Archivo generado no encontrado.');
+  if (!fs.existsSync(file.path)) throw notFound('El archivo ya no está disponible en el servidor.');
+  res.setHeader('Content-Type', file.mime);
+  res.setHeader('Content-Length', String(file.size));
+  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}`);
+  res.send(fs.readFileSync(file.path));
+}));
+
+aiRouter.delete('/generated/:id', asyncHandler(async (req, res) => {
+  const file = db.prepare('SELECT * FROM generated_files WHERE id = ? AND user_id = ?')
+    .get(req.params.id, req.user!.id) as any;
+  if (!file) throw notFound('Archivo generado no encontrado.');
+  safeUnlink(file.path);
+  db.prepare('DELETE FROM generated_files WHERE id = ?').run(file.id);
   res.json({ ok: true });
 }));
 
