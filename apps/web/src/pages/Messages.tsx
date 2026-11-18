@@ -2220,14 +2220,14 @@ export default function Messages() {
                     }}
                     style={bubbleStyle(mine ? 'mine' : 'other', bubbleColors.colors)}
                     className={cn(
-                      'relative px-3 py-1 text-[12.5px] leading-normal transition-shadow',
+                      'relative px-2.5 py-0.5 text-[12px] leading-[1.35] transition-shadow',
                       mine ? 'bubble-me' : 'bubble-other',
                       message.deleted && 'italic opacity-60',
                       highlightedId === message.id && 'ring-2 ring-fg/40 shadow-lift',
                     )}
                   >
                     {message.replyTo && !message.deleted && (
-                      <div className={cn('mb-1 rounded-lg border-l-2 px-1.5 py-0.5 text-[10px] leading-snug', mine ? 'border-white/40 bg-white/10 text-current opacity-75' : 'border-current bg-black/[.04] text-current opacity-55')}>
+                      <div className={cn('mb-1 rounded-md border-l-2 px-1.5 py-0.5 text-[10px] leading-snug', mine ? 'border-white/40 bg-white/10 text-current opacity-75' : 'border-current bg-black/[.04] text-current opacity-55')}>
                         <p className="font-medium">{message.replyTo.sender_name}</p>
                         <p className="line-clamp-2">{message.replyTo.body ?? 'Archivo adjunto'}</p>
                       </div>

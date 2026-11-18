@@ -61,7 +61,7 @@ export function BubbleColorPicker({ value, onChange, onReset, saving }: Props) {
           <div className="flex justify-end">
             <span
               style={bubbleStyle('mine', value)}
-              className="bubble-me relative inline-block max-w-[78%] px-2.5 py-1 text-[11.5px]"
+              className="bubble-me relative inline-block max-w-[78%] px-2 py-0.5 text-[11px]"
             >
               Así se verá tu mensaje
             </span>
@@ -69,7 +69,7 @@ export function BubbleColorPicker({ value, onChange, onReset, saving }: Props) {
           <div className="flex justify-start">
             <span
               style={bubbleStyle('other', value)}
-              className="bubble-other relative inline-block max-w-[78%] px-2.5 py-1 text-[11.5px]"
+              className="bubble-other relative inline-block max-w-[78%] px-2 py-0.5 text-[11px]"
             >
               Así se verá el mensaje recibido
             </span>
