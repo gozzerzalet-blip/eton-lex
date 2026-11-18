@@ -283,14 +283,17 @@ npm run db:restore -- <directorio-del-respaldo> --confirm
 
 ## Publicación y despliegue
 
+- Commit publicado: `570fa8d` en `main` (`gozzerzalet-blip/eton-lex`). Se integró
+  mediante rebase con los 107 commits que el repo local no tenía (mensajería
+  iMessage, noticias y PWA), resolviendo los conflictos sin descartarlos.
 - `npm run deploy:check -- --url https://a7yp4cd07ujg-production-zay69hs2.us-central1.suga.run`:
-  OK. La URL pública sigue respondiendo health, HTTPS, SEO básico y PWA; IA no
-  configurada, correo configurado, demo desactivada.
-- **Bloqueo operativo:** el entorno local no tiene `git` ni `gh`, y el flujo web
-  de GitHub devuelve 404 en `commit_upload_manifest`, así que no se creó commit.
-  El último commit remoto continúa siendo `d49a793`. Por eso los cambios de
-  Fases 0 a 5 están verificados localmente pero **todavía no desplegados**. No
-  se reintentará una carga parcial que pueda dejar el repositorio a medias.
+  OK. Health, HTTPS, SEO básico y PWA responden; IA no configurada, correo
+  configurado, demo desactivada.
+- Verificación posterior al despliegue automático de Suga: el HTML público sirve
+  el asset `index-DUsj9Fxq.js` (el nuevo build) y `GET /api/tutor/areas`
+  responde `401 UNAUTHORIZED`, prueba de que el router de Fase 5 está activo en
+  producción y exige sesión. El bloqueo anterior por falta de `git`/`gh` quedó
+  resuelto instalando Git for Windows con winget.
 
 ## Reglas que se mantienen en todas las fases
 
