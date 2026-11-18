@@ -165,6 +165,7 @@ function useCallController() {
   const [active, setActive] = useState<ActiveCall | null>(null);
   const [incoming, setIncoming] = useState<IncomingCall | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [localScreenStream, setLocalScreenStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [remoteAudioLive, setRemoteAudioLive] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -217,11 +218,13 @@ function useCallController() {
     }
   }, [connected]);
   useEffect(() => {
-    const element = active?.kind === 'video' ? remoteVideoRef.current : remoteAudioRef.current;
+    // Con vídeo remoto (cámara o pantalla) el sonido viaja en el <video>;
+    // el <audio> queda silenciado para no duplicarlo.
+    const element = remoteStream?.getVideoTracks().length ? remoteVideoRef.current : remoteAudioRef.current;
     if (!element || !audioOutputId) return;
     const withSink = element as HTMLMediaElement & { setSinkId?: (id: string) => Promise<void> };
     if (typeof withSink.setSinkId === 'function') void withSink.setSinkId(audioOutputId).catch(() => {});
-  }, [active?.kind, audioOutputId, remoteStream]);
+  }, [audioOutputId, remoteStream]);
 
   useEffect(() => {
     let cancelled = false;
@@ -269,6 +272,7 @@ function useCallController() {
     setSharing(false);
     setShareError(null);
     setLocalStream(null);
+    setLocalScreenStream(null);
     setRemoteStream(null);
     remoteStreamRef.current = null;
     remoteAudioRef.current?.removeAttribute('src');
@@ -299,9 +303,11 @@ function useCallController() {
 
     const refreshRemote = () => {
       const current = remoteStreamRef.current ?? new MediaStream();
-      setRemoteStream(new MediaStream(current.getTracks()));
-      const hasLiveAudio = current.getAudioTracks().some((track) => track.readyState === 'live' && !track.muted);
-      setRemoteAudioLive(hasLiveAudio);
+      const live = current.getTracks().filter((track) => track.readyState === 'live');
+      setRemoteStream(new MediaStream(live));
+      // `track.muted` puede quedarse en true en algunos navegadores aunque el
+      // audio ya esté llegando; la existencia de la pista es el dato fiable.
+      setRemoteAudioLive(live.some((track) => track.kind === 'audio'));
     };
 
     pc.onicecandidate = (event) => {
@@ -309,6 +315,11 @@ function useCallController() {
     };
     pc.ontrack = (event) => {
       const target = remoteStreamRef.current ?? new MediaStream();
+      // Solo puede haber un vídeo remoto: al compartir pantalla se sustituye
+      // la cámara. Los pistas de audio se conservan para no perder la voz.
+      if (event.track.kind === 'video') {
+        for (const track of target.getVideoTracks()) target.removeTrack(track);
+      }
       if (!target.getTracks().some((track) => track.id === event.track.id)) target.addTrack(event.track);
       remoteStreamRef.current = target;
       event.track.addEventListener('unmute', refreshRemote);
@@ -528,6 +539,7 @@ function useCallController() {
     const stream = screenStreamRef.current;
     screenStreamRef.current = null;
     setSharing(false);
+    setLocalScreenStream(null);
     setShareError(null);
     stream?.getTracks().forEach((track) => track.stop());
 
@@ -544,8 +556,9 @@ function useCallController() {
     }
     screenAudioSendersRef.current.clear();
     screenVideoSenderRef.current = null;
-    // En llamadas de voz el transceiver de vídeo es nuevo: hay que quitarlo con otra negociación.
-    if (current.kind === 'audio') sendShareOffer(current, pc);
+    // La vuelta a la cámara (o la retirada del vídeo en llamadas de voz)
+    // también necesita renegociarse para que el otro lado lo vea.
+    sendShareOffer(current, pc);
   }, [sendShareOffer]);
   stopShareRef.current = stopShare;
 
@@ -614,10 +627,13 @@ function useCallController() {
       catch { setShareError('El video se comparte; el audio de pantalla no está disponible en este navegador.'); }
     }
     setSharing(true);
+    setLocalScreenStream(stream);
     if (!audioTrack) {
       setShareError('Audio de pantalla no disponible: depende del navegador y de la opción elegida en el selector.');
     }
-    if (!videoSender || audioTrack) sendShareOffer(current, pc);
+    // Siempre renegociamos: en llamadas de voz añade el vídeo y, cuando se
+    // comparte audio del sistema, añade también esa pista.
+    sendShareOffer(current, pc);
   }, [sendShareOffer, sharing, stopShare]);
 
   useEffect(() => {
@@ -760,7 +776,7 @@ function useCallController() {
   }, [cleanup, signal, socket]);
 
   return {
-    active, incoming, localStream, remoteStream, connected, iceState, remoteAudioLive,
+    active, incoming, localStream, localScreenStream, remoteStream, connected, iceState, remoteAudioLive,
     devices, audioInputId, videoInputId, audioOutputId, facingMode,
     muted, cameraOn, error, start, accept, decline, end, toggleMute, toggleCamera,
     switchAudioInput, switchVideoInput, switchFacingMode, setAudioOutputId,
@@ -784,7 +800,6 @@ function CallLayer({ call }: { call: CallController }) {
     const attach = (element: HTMLMediaElement | null) => {
       if (!element) return;
       element.volume = 1;
-      element.muted = false;
       if (element.srcObject !== call.remoteStream) {
         element.srcObject = call.remoteStream ?? null;
         if (call.remoteStream) void element.play().catch(() => {});
@@ -792,8 +807,13 @@ function CallLayer({ call }: { call: CallController }) {
         void element.play().catch(() => {});
       }
     };
-    attach(call.active?.kind === 'video' ? call.remoteVideoRef.current : call.remoteAudioRef.current);
-  }, [call.active?.kind, call.remoteAudioRef, call.remoteVideoRef, call.remoteStream]);
+    // Adjuntamos a ambos elementos: el audio siempre suena por el <audio>
+    // cuando no hay vídeo, y por el <video> cuando hay cámara o pantalla.
+    attach(call.remoteAudioRef.current);
+    attach(call.remoteVideoRef.current);
+    const hasRemoteVideo = !!call.remoteStream?.getVideoTracks().length;
+    if (call.remoteAudioRef.current) call.remoteAudioRef.current.muted = hasRemoteVideo;
+  }, [call.remoteAudioRef, call.remoteVideoRef, call.remoteStream]);
 
   if (!call.active && !call.incoming) return null;
 
@@ -829,6 +849,16 @@ function CallLayer({ call }: { call: CallController }) {
 
   if (!call.active) return null;
   const video = call.active.kind === 'video';
+  const hasRemoteVideo = !!call.remoteStream?.getVideoTracks().length;
+
+  const forceAudio = () => {
+    const element = hasRemoteVideo ? call.remoteVideoRef.current : call.remoteAudioRef.current;
+    if (!element) return;
+    if (element.srcObject !== call.remoteStream) element.srcObject = call.remoteStream ?? null;
+    element.muted = false;
+    element.volume = 1;
+    void element.play().catch(() => {});
+  };
 
   return (
     <div className="fixed inset-0 z-[95] flex flex-col bg-[#0a0a0b] text-white backdrop-blur-xl">
@@ -842,7 +872,9 @@ function CallLayer({ call }: { call: CallController }) {
               {call.connected ? `En llamada · ${clock}` : call.active.status === 'ringing' || call.active.status === 'connecting' ? 'Conectando…' : 'Llamando…'}
             </p>
             {call.active.status === 'active' && !call.connected && (
-              <p className="mt-0.5 text-[10px] text-amber-300/70">Audio no disponible · verificando permisos y red</p>
+              <p className="mt-0.5 text-[10px] text-amber-300/70">
+                {call.iceState === 'failed' ? 'Audio no disponible · revisa tu red o permisos' : 'Conectando audio…'}
+              </p>
             )}
             {call.sharing && (
               <p className="mt-0.5 flex items-center gap-1.5 text-[10px] font-medium text-emerald-300/80">
@@ -857,22 +889,13 @@ function CallLayer({ call }: { call: CallController }) {
       </div>
 
       <div className="relative flex flex-1 items-center justify-center overflow-hidden px-4">
-        {video ? (
-          <>
-            <video
-              ref={call.remoteVideoRef}
-              autoPlay
-              playsInline
-              className="max-h-full w-full max-w-5xl rounded-2xl bg-black object-contain"
-            />
-            <video
-              ref={(element) => { if (element) element.srcObject = call.localStream; }}
-              autoPlay
-              playsInline
-              muted
-              className="absolute bottom-4 right-6 h-32 w-24 rounded-xl border border-white/15 bg-black object-cover shadow-lift sm:h-40 sm:w-28"
-            />
-          </>
+        {hasRemoteVideo ? (
+          <video
+            ref={call.remoteVideoRef}
+            autoPlay
+            playsInline
+            className="max-h-full w-full max-w-5xl rounded-2xl bg-black object-contain"
+          />
         ) : (
           <div className="text-center">
             <div className="mx-auto flex h-32 w-32 items-center justify-center rounded-full border border-white/15 bg-white/[.05]">
@@ -881,11 +904,46 @@ function CallLayer({ call }: { call: CallController }) {
             <p className="mt-5 font-display text-2xl text-white/90">{call.active.peerName}</p>
             <p className="mt-1 text-[12px] text-white/35">{call.connected ? `En llamada · ${clock}` : 'Estableciendo conexión…'}</p>
             <p className={cn('mt-3 flex items-center justify-center gap-1.5 text-[11px]', call.connected ? 'text-white/60' : 'text-amber-300/70')}>
-              <Volume2 size={12} /> {call.connected ? 'Audio conectado' : 'Audio no disponible'}
+              <Volume2 size={12} />{' '}
+              {call.connected
+                ? 'Audio conectado'
+                : call.iceState === 'failed'
+                  ? 'Audio no disponible'
+                  : 'Conectando audio…'}
             </p>
-            <audio ref={call.remoteAudioRef} autoPlay playsInline className="hidden" />
           </div>
         )}
+
+        {call.localScreenStream && (
+          <video
+            ref={(element) => { if (element && element.srcObject !== call.localScreenStream) element.srcObject = call.localScreenStream; }}
+            autoPlay
+            playsInline
+            muted
+            className="absolute bottom-4 left-6 h-28 w-44 rounded-xl border border-emerald-300/40 bg-black object-contain shadow-lift sm:h-36 sm:w-56"
+          />
+        )}
+        {video && (
+          <video
+            ref={(element) => { if (element && element.srcObject !== call.localStream) element.srcObject = call.localStream; }}
+            autoPlay
+            playsInline
+            muted
+            className="absolute bottom-4 right-6 h-32 w-24 rounded-xl border border-white/15 bg-black object-cover shadow-lift sm:h-40 sm:w-28"
+          />
+        )}
+
+        {!call.connected && (
+          <button
+            type="button"
+            onClick={forceAudio}
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-white/15 bg-black/60 px-3 py-1 text-[10px] text-white/75 hover:bg-white/10"
+          >
+            Activar audio
+          </button>
+        )}
+
+        <audio ref={call.remoteAudioRef} autoPlay playsInline className="hidden" />
       </div>
 
       <p className="relative mx-auto mt-1 max-w-md px-4 text-center text-[10px] leading-relaxed text-white/30">
