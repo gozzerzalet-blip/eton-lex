@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Archive, ArrowLeft, BellOff, Camera, Check, CheckCheck, Copy, Download, Eye, FileText, Forward,
   Image as ImageIcon, Info, Lock, MessageSquare, Mic, MicOff, MonitorOff, MonitorUp, MoreHorizontal,
-  Paperclip, Pause, Phone, PhoneOff, Pin, Play, Search, Send, Smile, Square, Trash2, UserPlus, Video,
+  Palette, Paperclip, Pause, Phone, PhoneCall, Pin, Play, Search, Send, Smile, Square, Trash2, UserPlus, Video,
   VideoOff, Volume2, X, Users, Plus,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -14,7 +14,9 @@ import { playConnectTone, playEndTone, startRingtone, stopRingtone } from '../li
 import { useAuth } from '../lib/store';
 import type { Conversation, Message } from '../lib/types';
 import { EmojiPicker } from '../components/EmojiPicker';
+import { BubbleColorPicker } from '../components/BubbleColorPicker';
 import { Avatar, Badge, EmptyState, Modal, Skeleton, Tabs } from '../components/ui';
+import { bubbleStyle, useBubbleColors } from '../lib/bubbleColors';
 import { cn, formatBytes, timeAgo } from '../lib/utils';
 
 type ConversationsResponse = { conversations: Conversation[] };
@@ -54,6 +56,74 @@ function formatClock(value: number) {
   return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
+/** Auricular clásico inclinado hacia abajo, propio de los botones de colgar. */
+function HangUpIcon({ size = 22 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <g transform="rotate(135 12 12)">
+        <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+      </g>
+    </svg>
+  );
+}
+
+/** Imagen autenticada: se descarga con la sesión y se muestra como blob. */
+function AuthedImage({ path, name, className }: { path: string; name?: string; className?: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    let cancelada = false;
+    let objectUrl: string | null = null;
+    setSrc(null);
+    setFailed(false);
+    api<Response>(path, {}, { raw: true })
+      .then(async (response) => {
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        if (cancelada) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        objectUrl = url;
+        setSrc(url);
+      })
+      .catch(() => { if (!cancelada) setFailed(true); });
+    return () => {
+      cancelada = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [path, attempt]);
+
+  if (failed) {
+    return (
+      <span className="flex flex-wrap items-center gap-2 py-1 text-[11px] italic opacity-60">
+        Imagen no disponible
+        <button type="button" onClick={() => setAttempt((value) => value + 1)} className="underline">
+          Reintentar
+        </button>
+      </span>
+    );
+  }
+
+  if (!src) {
+    return <div className={cn('min-h-20 animate-pulse rounded-lg bg-fg/[.06]', className)} aria-label="Cargando imagen" />;
+  }
+
+  return (
+    <a href={src} target="_blank" rel="noreferrer" className="block">
+      <img
+        src={src}
+        alt={name ?? 'Imagen del chat'}
+        className={className}
+        loading="lazy"
+        onError={() => setFailed(true)}
+      />
+    </a>
+  );
+}
+
 function AudioNote({ fileId, name }: { fileId: string; name?: string }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [src, setSrc] = useState<string | null>(null);
@@ -62,6 +132,17 @@ function AudioNote({ fileId, name }: { fileId: string; name?: string }) {
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
   const [rate, setRate] = useState(1);
+
+  // Forma de onda estable por archivo: no es decorativa, cada barra marca una
+  // posición real de la grabación y se ilumina con el progreso de reproducción.
+  const waveform = useMemo(() => {
+    let seed = 0;
+    for (const char of fileId) seed = (seed * 31 + char.charCodeAt(0)) | 0;
+    return Array.from({ length: 30 }, (_, index) => {
+      const wave = Math.abs(Math.sin(Math.abs(seed % 997) / 71 + index * 0.68));
+      return Math.round(26 + wave * 66);
+    });
+  }, [fileId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +157,11 @@ function AudioNote({ fileId, name }: { fileId: string; name?: string }) {
       .catch(() => { if (!cancelled) setAudioError(true); });
     return () => { cancelled = true; };
   }, [fileId]);
+
+  // Al cambiar el archivo, HTMLAudioElement puede restablecer la velocidad.
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.playbackRate = rate;
+  }, [rate, src]);
 
   const refreshUrl = () => {
     api<{ token: string; url: string }>(`/files/${fileId}/audio-token`)
@@ -92,9 +178,10 @@ function AudioNote({ fileId, name }: { fileId: string; name?: string }) {
 
   const seek = (value: number) => {
     const audio = audioRef.current;
-    if (!audio) return;
-    audio.currentTime = value;
-    setCurrent(value);
+    if (!audio || !duration) return;
+    const next = Math.max(0, Math.min(value, duration));
+    audio.currentTime = next;
+    setCurrent(next);
   };
 
   const cycleRate = () => {
@@ -103,40 +190,98 @@ function AudioNote({ fileId, name }: { fileId: string; name?: string }) {
     if (audioRef.current) audioRef.current.playbackRate = next;
   };
 
+  const progress = duration > 0 ? Math.min(1, current / duration) : 0;
+
   return (
-    <div className="flex w-64 max-w-full items-center gap-1.5 rounded-xl border border-line/70 bg-fg/[.03] px-2 py-1.5 dark:bg-white/[.06]">
+    <div className="w-[min(15rem,58vw)] select-none">
       <audio
         ref={audioRef}
         src={src ?? undefined}
         preload="metadata"
-        onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
+        onLoadedMetadata={(event) => {
+          setDuration(event.currentTarget.duration || 0);
+          event.currentTarget.playbackRate = rate;
+        }}
         onTimeUpdate={(event) => setCurrent(event.currentTarget.currentTime)}
-        onEnded={() => { setPlaying(false); setCurrent(0); }}
+        onSeeked={(event) => setCurrent(event.currentTarget.currentTime)}
+        onEnded={() => {
+          setPlaying(false);
+          if (audioRef.current) audioRef.current.currentTime = 0;
+          setCurrent(0);
+        }}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onError={() => { setAudioError(true); refreshUrl(); }}
       />
-      {audioError && <span className="text-[9px] text-rose-400">Audio no disponible</span>}
-      <button type="button" onClick={toggle} className="rounded-full p-1 text-fg/70 hover:bg-fg/10 hover:text-fg" aria-label={playing ? 'Pausar' : 'Reproducir'}>
-        {playing ? <Pause size={13} /> : <Play size={13} />}
-      </button>
-      <input
-        type="range"
-        min={0}
-        max={duration || 1}
-        step={0.1}
-        value={Math.min(current, duration || 1)}
-        onChange={(event) => seek(Number(event.target.value))}
-        className="h-1 min-w-0 flex-1 cursor-pointer accent-current"
-        aria-label="Progreso de la nota de voz"
-      />
-      <span className="shrink-0 text-[9px] tabular-nums text-fg/45">{formatClock(duration ? duration - current : 0)}</span>
-      <button type="button" onClick={cycleRate} className="shrink-0 rounded-md px-1 py-0.5 text-[9px] font-semibold text-fg/55 hover:bg-fg/10" title="Velocidad de reproducción">
-        {rate}x
-      </button>
-      <a href={src ?? '#'} onClick={(event) => { if (!src) event.preventDefault(); }} download={name ?? 'nota-de-voz.webm'} className="shrink-0 rounded-md p-1 text-fg/45 hover:bg-fg/10 hover:text-fg" title="Descargar nota de voz" aria-label="Descargar nota de voz">
-        <Download size={12} />
-      </a>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={toggle}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/90 text-[#111214] shadow-[0_6px_16px_-10px_rgba(0,0,0,.9)] transition-transform hover:scale-105 dark:bg-white/95"
+          aria-label={playing ? 'Pausar nota de voz' : 'Reproducir nota de voz'}
+          title={playing ? 'Pausar' : 'Reproducir'}
+        >
+          {playing ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" className="ml-0.5" />}
+        </button>
+
+        <div className="min-w-0 flex-1">
+          <div className="relative flex h-6 items-end gap-[1.5px]">
+            {waveform.map((height, index) => (
+              <span
+                key={index}
+                className={cn(
+                  'w-full rounded-full transition-opacity duration-150',
+                  index / waveform.length <= progress ? 'opacity-90' : 'opacity-25',
+                )}
+                style={{ height: `${height}%`, backgroundColor: 'currentColor' }}
+              />
+            ))}
+            <input
+              type="range"
+              min={0}
+              max={duration || 1}
+              step={0.05}
+              value={Math.min(current, duration || 1)}
+              onChange={(event) => seek(Number(event.target.value))}
+              className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+              aria-label="Progreso de la nota de voz"
+              aria-valuetext={`${formatClock(current)} de ${formatClock(duration)}`}
+            />
+          </div>
+          <div className="mt-0.5 flex items-center justify-between text-[8.5px] tabular-nums opacity-50">
+            <span>{formatClock(current)}</span>
+            <span>{formatClock(duration)}</span>
+          </div>
+        </div>
+
+        <div className="flex shrink-0 flex-col items-center gap-1">
+          <button
+            type="button"
+            onClick={cycleRate}
+            className="rounded-full border border-current px-1 py-0 text-[8.5px] font-semibold tabular-nums opacity-75 transition-opacity hover:opacity-100"
+            title="Velocidad de reproducción"
+            aria-label={`Velocidad de reproducción: ${rate}x`}
+          >
+            {rate}x
+          </button>
+          <a
+            href={src ?? '#'}
+            onClick={(event) => { if (!src) event.preventDefault(); }}
+            download={name ?? 'nota-de-voz.webm'}
+            className="rounded-full p-0.5 opacity-50 transition-opacity hover:opacity-100"
+            title="Descargar nota de voz"
+            aria-label="Descargar nota de voz"
+          >
+            <Download size={11} />
+          </a>
+        </div>
+      </div>
+      {audioError && (
+        <div className="mt-1 flex items-center gap-2 text-[9.5px] italic opacity-65">
+          Audio no disponible
+          <button type="button" onClick={refreshUrl} className="underline">Reintentar</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -830,16 +975,22 @@ function CallLayer({ call }: { call: CallController }) {
           <p className="mt-1 text-[12px] text-fg/40">
             Llamada {call.incoming.kind === 'video' ? 'de video' : 'de voz'} entrante
           </p>
-          <div className="mt-7 flex items-center justify-center gap-4">
-            <button onClick={call.decline} className="flex h-14 w-14 items-center justify-center rounded-full border border-fg/15 bg-white/60 text-fg shadow-sm transition-transform hover:scale-105 dark:bg-white/[.06]" aria-label="Rechazar">
-              <PhoneOff size={22} />
-            </button>
-            <button onClick={call.accept} className="flex h-14 w-14 items-center justify-center rounded-full bg-fg text-paper shadow-[0_14px_30px_-18px_rgba(0,0,0,.9)] transition-transform hover:scale-105" aria-label="Aceptar">
-              {call.incoming.kind === 'video' ? <Video size={22} /> : <Phone size={22} />}
-            </button>
+          <div className="mt-7 flex items-center justify-center gap-7">
+            <div className="flex flex-col items-center gap-1.5">
+              <button onClick={call.decline} className="flex h-14 w-14 items-center justify-center rounded-full border border-red-500/40 bg-red-500/10 text-red-500 shadow-sm transition-transform hover:scale-105 hover:bg-red-500/20" aria-label="Rechazar llamada" title="Rechazar llamada">
+                <HangUpIcon size={22} />
+              </button>
+              <span className="text-[10px] font-medium text-fg/45">Rechazar</span>
+            </div>
+            <div className="flex flex-col items-center gap-1.5">
+              <button onClick={call.accept} className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-500 text-white shadow-[0_14px_30px_-18px_rgba(16,185,129,.9)] transition-transform hover:scale-105" aria-label="Contestar llamada" title="Contestar llamada">
+                {call.incoming.kind === 'video' ? <Video size={22} /> : <PhoneCall size={22} />}
+              </button>
+              <span className="text-[10px] font-medium text-emerald-500">Contestar</span>
+            </div>
           </div>
           <p className="mx-auto mt-5 max-w-[17rem] text-[10px] leading-relaxed text-fg/25">
-            Llamada P2P cifrada por WebRTC · al aceptar se solicitan permisos de micrófono
+            Llamada directa y cifrada · al contestar se solicitan permisos de micrófono
             {call.incoming.kind === 'video' ? ' y cámara' : ''}. El audio viaja directamente entre ustedes.
           </p>
         </div>
@@ -947,7 +1098,7 @@ function CallLayer({ call }: { call: CallController }) {
       </div>
 
       <p className="relative mx-auto mt-1 max-w-md px-4 text-center text-[10px] leading-relaxed text-white/30">
-        Se solicitan permisos de micrófono{video ? ' y cámara' : ''}. Llamada P2P: el audio
+        Se solicitan permisos de micrófono{video ? ' y cámara' : ''}. La llamada es directa: el audio
         {video ? ' y el video' : ''} viajan directamente entre ustedes, sin pasar por nuestros servidores.
       </p>
 
@@ -967,7 +1118,7 @@ function CallLayer({ call }: { call: CallController }) {
         <div className="relative mx-auto mb-2 flex max-w-3xl flex-wrap items-center justify-center gap-2 px-4 text-[10px] text-white/45">
           {call.devices.audioInputs.length > 1 && (
             <label className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/[.04] px-2 py-1">
-              Mic
+              Micrófono
               <select value={call.audioInputId} onChange={(event) => void call.switchAudioInput(event.target.value)} className="max-w-[130px] bg-transparent text-white/70 outline-none [&>option]:bg-[#101013]">
                 {call.devices.audioInputs.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Micrófono ${index + 1}`}</option>)}
               </select>
@@ -1030,8 +1181,14 @@ function CallLayer({ call }: { call: CallController }) {
           {call.sharing ? <MonitorOff size={18} /> : <MonitorUp size={18} />}
           {call.sharing ? 'Detener compartición' : 'Compartir pantalla'}
         </button>
-        <button onClick={call.end} className="flex h-14 w-14 items-center justify-center rounded-full bg-white text-[#0a0a0b] shadow-[0_16px_34px_-18px_rgba(255,255,255,.5)] transition-transform hover:scale-105" aria-label="Finalizar llamada">
-          <PhoneOff size={22} />
+        <button
+          type="button"
+          onClick={call.end}
+          className="flex h-14 w-14 items-center justify-center rounded-full bg-red-500 text-white shadow-[0_16px_34px_-18px_rgba(239,68,68,.95)] ring-4 ring-red-500/15 transition-transform hover:scale-105 hover:bg-red-600"
+          aria-label="Finalizar llamada"
+          title="Finalizar llamada"
+        >
+          <HangUpIcon size={23} />
         </button>
       </div>
     </div>
@@ -1047,6 +1204,7 @@ export default function Messages() {
   const { user } = useAuth();
   const socket = useSocket();
   const call = useCallController();
+  const bubbleColors = useBubbleColors();
 
   const [search, setSearch] = useState('');
   const [listFilter, setListFilter] = useState<ListFilter>('all');
@@ -1061,6 +1219,7 @@ export default function Messages() {
   const [typingName, setTypingName] = useState<string | null>(null);
   const [online, setOnline] = useState<Set<string>>(new Set());
   const [infoOpen, setInfoOpen] = useState(false);
+  const [colorsOpen, setColorsOpen] = useState(false);
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [studentSearch, setStudentSearch] = useState('');
   const [reactionFor, setReactionFor] = useState<string | null>(null);
@@ -1491,7 +1650,12 @@ export default function Messages() {
       const document = uploaded.documents[0];
       await api(`/messaging/conversations/${id}/messages`, {
         method: 'POST',
-        body: JSON.stringify({ kind, attachmentId: document.id, body: document.name, replyTo: replyTo?.id ?? null }),
+        body: JSON.stringify({
+          kind,
+          attachmentId: document.id,
+          body: kind === 'image' ? undefined : document.name,
+          replyTo: replyTo?.id ?? null,
+        }),
       });
       setReplyTo(null);
       invalidateChat();
@@ -1517,7 +1681,6 @@ export default function Messages() {
       await api(`/messaging/conversations/${id}/messages`, {
         method: 'POST',
         body: JSON.stringify({
-          body: 'Foto única',
           kind: 'image',
           attachmentId: document.id,
           oneTime: true,
@@ -1588,11 +1751,16 @@ export default function Messages() {
   const sendSticker = async (sticker: Sticker) => {
     if (!id) return;
     try {
+      const response = await api<Response>(sticker.url.replace(/^\/api/, ''), {}, { raw: true });
+      const blob = await response.blob();
+      const form = new FormData();
+      form.append('files', new File([blob], `${sticker.name}.png`, { type: sticker.mime || 'image/png' }));
+      const uploaded = await api<{ documents: Array<{ id: string }> }>('/documents', { method: 'POST', body: form });
       await api(`/messaging/conversations/${id}/messages`, {
         method: 'POST',
         body: JSON.stringify({
-          body: sticker.name,
           kind: 'image',
+          attachmentId: uploaded.documents[0].id,
           stickerPack: sticker.pack_id,
           replyTo: replyTo?.id ?? null,
         }),
@@ -1602,7 +1770,7 @@ export default function Messages() {
       invalidateChat();
       socket?.emit('typing', { conversationId: id, typing: false });
     } catch (error) {
-      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo enviar el sticker.');
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo enviar la pegatina.');
     }
   };
 
@@ -1617,7 +1785,7 @@ export default function Messages() {
       setActivePackId(response.pack.id);
       setNewPackName('');
       await queryClient.invalidateQueries({ queryKey: ['sticker-packs'] });
-      toast.success('Paquete de stickers creado.');
+      toast.success('Paquete de pegatinas creado.');
     } catch (error) {
       toast.error(error instanceof ApiClientError ? error.message : 'No se pudo crear el paquete.');
     }
@@ -1626,11 +1794,11 @@ export default function Messages() {
   const uploadSticker = async (file: File) => {
     const packId = activePackId ?? packsQuery.data?.packs[0]?.id;
     if (!packId) {
-      toast.error('Crea un paquete antes de subir stickers.');
+      toast.error('Crea un paquete antes de subir pegatinas.');
       return;
     }
     if (!file.type.startsWith('image/')) {
-      toast.error('Los stickers deben ser imágenes.');
+      toast.error('Las pegatinas deben ser imágenes.');
       return;
     }
     setStickerUploading(true);
@@ -1643,9 +1811,9 @@ export default function Messages() {
         queryClient.invalidateQueries({ queryKey: ['sticker-packs'] }),
         queryClient.invalidateQueries({ queryKey: ['sticker-stickers'] }),
       ]);
-      toast.success('Sticker agregado al paquete.');
+      toast.success('Pegatina agregada al paquete.');
     } catch (error) {
-      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo subir el sticker.');
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo subir la pegatina.');
     } finally {
       setStickerUploading(false);
     }
@@ -1654,15 +1822,25 @@ export default function Messages() {
   const sendForward = async (targetId: string) => {
     if (!forwardFor) return;
     const ownAttachment = forwardFor.sender.id === user?.id ? forwardFor.attachment ?? null : null;
-    const body = forwardFor.body ??
+    let attachmentId = ownAttachment?.id ?? null;
+    let body: string | undefined = forwardFor.body ??
       (forwardFor.attachment && !ownAttachment ? `📎 ${forwardFor.attachment.name}` : 'Mensaje reenviado');
     try {
+      if (forwardFor.attachment && !ownAttachment && forwardFor.attachment.mime.startsWith('image/')) {
+        const response = await api<Response>(`/files/${forwardFor.attachment.id}`, {}, { raw: true });
+        const blob = await response.blob();
+        const form = new FormData();
+        form.append('files', new File([blob], forwardFor.attachment.name, { type: forwardFor.attachment.mime }));
+        const uploaded = await api<{ documents: Array<{ id: string }> }>('/documents', { method: 'POST', body: form });
+        attachmentId = uploaded.documents[0].id;
+        body = undefined;
+      }
       await api(`/messaging/conversations/${targetId}/messages`, {
         method: 'POST',
         body: JSON.stringify({
           body,
-          kind: forwardFor.kind,
-          attachmentId: ownAttachment?.id ?? null,
+          kind: attachmentId && forwardFor.attachment?.mime.startsWith('image/') ? 'image' : forwardFor.kind,
+          attachmentId,
           stickerPack: forwardFor.stickerPack ?? null,
         }),
       });
@@ -1817,7 +1995,7 @@ export default function Messages() {
               : item.lastMessage.oneTime
                 ? '🔒 Foto única'
                 : item.lastMessage.stickerPack
-                  ? '🎨 Sticker'
+                  ? '🎨 Pegatina'
                   : item.lastMessage.kind === 'image'
                     ? '📷 Imagen'
                     : item.lastMessage.kind === 'audio'
@@ -1932,6 +2110,14 @@ export default function Messages() {
               </>
             )}
             <button
+              onClick={() => setColorsOpen(true)}
+              className="btn btn-ghost btn-sm !px-2"
+              title="Colores de las burbujas"
+              aria-label="Colores de las burbujas"
+            >
+              <Palette size={15} />
+            </button>
+            <button
               onClick={() => setHeaderSearchOpen((open) => !open)}
               className={cn('btn btn-ghost btn-sm !px-2', headerSearchOpen && 'bg-fg/[.08]')}
               title="Buscar en la conversación"
@@ -2015,6 +2201,9 @@ export default function Messages() {
           const showDay = !previous || new Date(previous.createdAt).toDateString() !== new Date(message.createdAt).toDateString();
           const showSender = conversation?.type === 'group' && (!previous || previous.sender.id !== message.sender.id);
           const sticker = message.stickerPack && message.body ? stickerByBody.get(message.body) : undefined;
+          const isImageAttachment = Boolean(
+            message.attachment && (message.kind === 'image' || message.attachment.mime.startsWith('image/')),
+          );
           const oneTimeUrl = oneTimeImages[message.id];
 
           return (
@@ -2030,7 +2219,7 @@ export default function Messages() {
               <div className={cn('group flex items-end gap-2', mine ? 'flex-row-reverse' : 'flex-row')}>
                 {!mine && <Avatar name={message.sender.name} url={message.sender.avatarUrl} size={26} className={cn(showSender ? '' : 'invisible')} />}
 
-                <div className={cn('relative max-w-[78%] sm:max-w-[68%]', mine ? 'items-end' : 'items-start')}>
+                <div className={cn('relative max-w-[72%] sm:max-w-[62%]', mine ? 'items-end' : 'items-start')}>
                   {showSender && !mine && <p className="mb-0.5 pl-1 text-[10px] font-medium text-fg/40">{message.sender.name}</p>}
 
                   <div
@@ -2041,15 +2230,16 @@ export default function Messages() {
                       event.preventDefault();
                       setToolbarFor(message.id);
                     }}
+                    style={bubbleStyle(mine ? 'mine' : 'other', bubbleColors.colors)}
                     className={cn(
-                      'relative px-3.5 py-2 text-[13px] leading-relaxed transition-shadow',
+                      'relative px-3 py-1 text-[12.5px] leading-normal transition-shadow',
                       mine ? 'bubble-me' : 'bubble-other',
                       message.deleted && 'italic opacity-60',
                       highlightedId === message.id && 'ring-2 ring-fg/40 shadow-lift',
                     )}
                   >
                     {message.replyTo && !message.deleted && (
-                      <div className={cn('mb-1.5 rounded-lg border-l-2 px-2 py-1 text-[10.5px]', mine ? 'border-white/40 bg-white/10 text-white/70 dark:border-black/20 dark:bg-black/[.06] dark:text-black/60' : 'border-fg/25 bg-fg/[.04] text-fg/50')}>
+                      <div className={cn('mb-1 rounded-lg border-l-2 px-1.5 py-0.5 text-[10px] leading-snug', mine ? 'border-white/40 bg-white/10 text-current opacity-75' : 'border-current bg-black/[.04] text-current opacity-55')}>
                         <p className="font-medium">{message.replyTo.sender_name}</p>
                         <p className="line-clamp-2">{message.replyTo.body ?? 'Archivo adjunto'}</p>
                       </div>
@@ -2060,7 +2250,7 @@ export default function Messages() {
                     ) : (
                       <>
                         {sticker && (
-                          <img src={sticker.url} alt={sticker.name} className="h-28 w-28 object-contain" loading="lazy" />
+                          <AuthedImage path={sticker.url.replace(/^\/api/, '')} name={sticker.name} className="h-28 w-28 object-contain" />
                         )}
 
                         {message.oneTime && message.kind === 'image' && !mine ? (
@@ -2072,46 +2262,48 @@ export default function Messages() {
                               </span>
                             </span>
                           ) : message.viewed ? (
-                            <span className="flex items-center gap-1.5 py-1 text-[11px] italic text-fg/40"><Eye size={12} /> Foto única visualizada</span>
+                            <span className="flex items-center gap-1.5 py-1 text-[11px] italic opacity-50"><Eye size={12} /> Foto única visualizada</span>
                           ) : (
                             <button
                               type="button"
                               onClick={() => void openOneTime(message)}
-                              className="flex items-center gap-2 rounded-lg border border-dashed border-line px-3 py-3 text-[11px] text-fg/55 transition-colors hover:bg-fg/[.05]"
+                              className="flex items-center gap-2 rounded-lg border border-dashed border-current px-3 py-3 text-[11px] opacity-70 transition-opacity hover:opacity-100"
                             >
                               <Lock size={14} /> Ver foto única
                             </button>
                           )
-                        ) : message.attachment && message.kind === 'image' && !sticker ? (
-                          <a href={`/api/files/${message.attachment.id}`} target="_blank" rel="noreferrer" className="block">
-                            <img src={`/api/files/${message.attachment.id}`} alt={message.attachment.name} className="max-h-72 rounded-lg object-cover" loading="lazy" />
-                          </a>
+                        ) : isImageAttachment && !sticker ? (
+                          <AuthedImage
+                            path={`/files/${message.attachment!.id}`}
+                            name={message.attachment!.name}
+                            className="max-h-72 rounded-lg object-cover"
+                          />
                         ) : null}
 
                         {message.attachment && (message.kind === 'audio' || message.attachment.mime.startsWith('audio/')) && (
                           <AudioNote fileId={message.attachment.id} name={message.attachment.name} />
                         )}
                         {message.attachment && message.kind === 'file' && (
-                          <a href={`/api/files/${message.attachment.id}`} target="_blank" rel="noreferrer" className={cn('flex items-center gap-2 rounded-lg px-2 py-1.5', mine ? 'bg-white/10 hover:bg-white/20 dark:bg-black/[.06] dark:hover:bg-black/[.1]' : 'bg-fg/[.04] hover:bg-fg/[.07]')}>
-                            <FileText size={16} className={cn('shrink-0', mine ? 'text-white/70 dark:text-black/60' : 'text-fg/60')} />
+                          <a href={`/api/files/${message.attachment.id}`} target="_blank" rel="noreferrer" className={cn('flex items-center gap-2 rounded-lg px-2 py-1.5', mine ? 'bg-white/10 hover:bg-white/20' : 'bg-black/[.05] hover:bg-black/[.09]')}>
+                            <FileText size={16} className="shrink-0 opacity-60" />
                             <span className="min-w-0">
-                              <span className={cn('block truncate text-[12px]', mine ? 'text-white/90 dark:text-black/80' : 'text-fg/85')}>{message.attachment.name}</span>
-                              <span className={cn('block text-[10px]', mine ? 'text-white/50 dark:text-black/50' : 'text-fg/40')}>{formatBytes(message.attachment.size)}</span>
+                              <span className="block truncate text-[12px] opacity-90">{message.attachment.name}</span>
+                              <span className="block text-[10px] opacity-50">{formatBytes(message.attachment.size)}</span>
                             </span>
                           </a>
                         )}
 
-                        {message.body && !sticker && (message.kind !== 'file' || message.body !== message.attachment?.name) && (
+                        {message.body && !sticker && !isImageAttachment && (message.kind !== 'file' || message.body !== message.attachment?.name) && (
                           <p className="whitespace-pre-wrap break-words">{message.body}</p>
                         )}
                       </>
                     )}
 
-                    <div className={cn('mt-1 flex items-center gap-1.5 text-[9px]', mine ? 'justify-end text-white/50 dark:text-black/50' : 'text-fg/30')}>
+                    <div className={cn('mt-1 flex items-center gap-1.5 text-[9px] opacity-50', mine && 'justify-end')}>
                       <span>{new Intl.DateTimeFormat('es-PE', { hour: '2-digit', minute: '2-digit' }).format(new Date(message.createdAt))}</span>
                       {message.oneTime && <Lock size={10} aria-label="Visualización única" />}
                       {message.editedAt && <span>editado</span>}
-                      {mine && !message.deleted && <CheckCheck size={11} className={isReadByPeer(message) ? 'text-white dark:text-black' : 'text-white/40 dark:text-black/40'} />}
+                      {mine && !message.deleted && <CheckCheck size={11} className={cn('text-current', !isReadByPeer(message) && 'opacity-60')} />}
                     </div>
                   </div>
 
@@ -2194,15 +2386,15 @@ export default function Messages() {
         {stickerOpen && (
           <div className="absolute bottom-full left-3 z-30 mb-2 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-line/80 bg-white/95 shadow-lift backdrop-blur-xl dark:bg-white/[.1]" onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-line/70 px-3 py-2">
-              <p className="text-[11px] font-medium text-fg/70">Stickers</p>
+              <p className="text-[11px] font-medium text-fg/70">Pegatinas</p>
               <button
                 type="button"
                 onClick={() => stickerFileRef.current?.click()}
                 disabled={stickerUploading || !packsQuery.data?.packs.length}
                 className="btn btn-ghost btn-sm !px-2 !py-1 !text-[10px]"
-                title="Subir sticker al paquete activo"
+                title="Subir pegatina al paquete activo"
               >
-                {stickerUploading ? 'Subiendo…' : 'Subir sticker'}
+                {stickerUploading ? 'Subiendo…' : 'Subir pegatina'}
               </button>
             </div>
             <div className="flex gap-1 overflow-x-auto px-3 py-2">
@@ -2222,7 +2414,7 @@ export default function Messages() {
                 </button>
               ))}
               {!packsQuery.data?.packs.length && (
-                <p className="text-[10px] text-fg/40">Crea un paquete para guardar tus stickers.</p>
+                <p className="text-[10px] text-fg/40">Crea un paquete para guardar tus pegatinas.</p>
               )}
             </div>
             <div className="grid max-h-44 grid-cols-5 gap-1 overflow-y-auto px-3 pb-2">
@@ -2234,11 +2426,11 @@ export default function Messages() {
                   title={sticker.name}
                   className="flex h-14 items-center justify-center rounded-lg border border-line/70 bg-white/50 transition-colors hover:bg-fg/[.06] dark:bg-white/[.05]"
                 >
-                  <img src={sticker.url} alt={sticker.name} className="h-12 w-12 object-contain" />
+                  <AuthedImage path={sticker.url.replace(/^\/api/, '')} name={sticker.name} className="h-12 w-12 object-contain" />
                 </button>
               ))}
               {!visibleStickers.length && (
-                <p className="col-span-5 py-3 text-center text-[10px] text-fg/35">Este paquete aún no tiene stickers.</p>
+                <p className="col-span-5 py-3 text-center text-[10px] text-fg/35">Este paquete aún no tiene pegatinas.</p>
               )}
             </div>
             <div className="flex gap-1.5 border-t border-line/70 px-3 py-2">
@@ -2309,7 +2501,7 @@ export default function Messages() {
             />
             <div className="flex items-center">
               <button type="button" onClick={() => { setStickerOpen(false); setComposerEmojiOpen((open) => !open); }} className="btn btn-ghost btn-sm !px-1.5" title="Emojis" aria-label="Emojis"><Smile size={17} /></button>
-              <button type="button" onClick={() => { setComposerEmojiOpen(false); setStickerOpen((open) => !open); }} className={cn('btn btn-ghost btn-sm !px-1.5', stickerOpen && 'bg-fg/[.08]')} title="Stickers" aria-label="Stickers"><ImageIcon size={17} /></button>
+              <button type="button" onClick={() => { setComposerEmojiOpen(false); setStickerOpen((open) => !open); }} className={cn('btn btn-ghost btn-sm !px-1.5', stickerOpen && 'bg-fg/[.08]')} title="Pegatinas" aria-label="Pegatinas"><ImageIcon size={17} /></button>
               <button type="button" onClick={() => fileRef.current?.click()} disabled={uploading} className="btn btn-ghost btn-sm !px-1.5" title="Adjuntar archivo" aria-label="Adjuntar archivo">
                 <Paperclip size={17} className={uploading ? 'animate-pulse' : ''} />
               </button>
@@ -2325,6 +2517,21 @@ export default function Messages() {
                   event.preventDefault();
                   void send();
                 }
+              }}
+              onPaste={(event) => {
+                const file = Array.from(event.clipboardData.items)
+                  .find((item) => item.type.startsWith('image/'))
+                  ?.getAsFile();
+                if (file) {
+                  event.preventDefault();
+                  void uploadAndSend(file, 'image');
+                }
+              }}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault();
+                const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith('image/'));
+                if (file) void uploadAndSend(file, 'image');
               }}
               rows={1}
               placeholder="Escribe un mensaje…"
@@ -2375,6 +2582,15 @@ export default function Messages() {
       </p>
 
       <CallLayer call={call} />
+
+      <Modal open={colorsOpen} onClose={() => setColorsOpen(false)} title="Colores de las burbujas" width="max-w-md">
+        <BubbleColorPicker
+          value={bubbleColors.colors}
+          onChange={(next) => void bubbleColors.update(next)}
+          onReset={() => void bubbleColors.reset()}
+          saving={bubbleColors.saving}
+        />
+      </Modal>
 
       <Modal open={infoOpen} onClose={() => setInfoOpen(false)} title="Detalles de la conversación">
         {conversation && (

@@ -43,6 +43,27 @@ const TABS: Array<{ id: Tab; label: string }> = [
 const NORM_TYPES = ['constitucion', 'codigo', 'ley', 'decreto_legislativo', 'decreto_supremo', 'resolucion', 'reglamento', 'tratado'];
 const NORM_STATUSES = ['vigente', 'modificado', 'parcialmente_derogado', 'derogado', 'por_verificar'];
 
+const ROLE_LABEL: Record<string, string> = {
+  student: 'Estudiante', moderator: 'Moderador', admin: 'Administrador',
+};
+const REPORT_STATUS_LABEL: Record<string, string> = {
+  open: 'Abierto', reviewed: 'Revisado', actioned: 'Sancionado', dismissed: 'Descartado',
+};
+const REPORT_TARGET_LABEL: Record<string, string> = {
+  norm: 'Norma', article: 'Artículo', post: 'Publicación', message: 'Mensaje', user: 'Usuario', news: 'Noticia',
+};
+const RUN_STATUS_LABEL: Record<string, string> = { ok: 'Correcto', error: 'Error', running: 'En curso' };
+const RUN_KIND_LABEL: Record<string, string> = { news: 'Noticias', legislation: 'Legislación', legislative: 'Legislación' };
+const QUEUE_STATUS_LABEL: Record<string, string> = { pending: 'Pendiente', confirmed: 'Confirmado', rejected: 'Rechazado' };
+const AUDIT_ACTION_LABEL: Record<string, string> = {
+  'admin.role': 'Rol actualizado',
+  'admin.user_role': 'Rol actualizado',
+  'admin.report_status': 'Estado de reporte actualizado',
+  'admin.norm_verify': 'Norma verificada',
+  'auth.change_password': 'Contraseña actualizada',
+};
+const SpanishLabel = (map: Record<string, string>, value: string) => map[value] ?? 'No especificado';
+
 const emptyNormForm = {
   title: '', shortTitle: '', number: '', type: 'ley', area: '', entity: '',
   publishedAt: '', effectiveAt: '', status: 'por_verificar', officialUrl: '', summary: '',
@@ -302,8 +323,8 @@ export default function Admin() {
               <div className="mt-3 space-y-2">
                 {overviewQuery.data?.recentRuns.map((runItem) => (
                   <div key={runItem.id} className="flex flex-wrap items-center gap-2 rounded-xl border border-line px-3 py-2">
-                    <Badge tone={runItem.status === 'ok' ? 'success' : runItem.status === 'error' ? 'danger' : 'warn'}>{runItem.status}</Badge>
-                    <span className="text-[11.5px] text-fg/70">{runItem.kind}</span>
+                    <Badge tone={runItem.status === 'ok' ? 'success' : runItem.status === 'error' ? 'danger' : 'warn'}>{SpanishLabel(RUN_STATUS_LABEL, runItem.status)}</Badge>
+                    <span className="text-[11.5px] text-fg/70">{SpanishLabel(RUN_KIND_LABEL, runItem.kind)}</span>
                     {runItem.source_key && <span className="text-[10px] text-fg/30">{runItem.source_key}</span>}
                     <span className="ml-auto text-[10px] text-fg/25">{formatDate(runItem.started_at, { dateStyle: 'medium', timeStyle: 'short' })}</span>
                     {runItem.error && <p className="w-full text-[10.5px] text-bad/70">{runItem.error}</p>}
@@ -337,8 +358,8 @@ export default function Admin() {
             {normsQuery.data?.norms.map((norm) => (
               <article key={norm.id} className="card flex flex-col p-4">
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <Badge tone={norm.status === 'vigente' ? 'success' : norm.status === 'derogado' || norm.status === 'parcialmente_derogado' ? 'danger' : 'warn'}>{statusLabel[norm.status] ?? norm.status}</Badge>
-                  <Badge>{typeLabel[norm.type] ?? norm.type}</Badge>
+                  <Badge tone={norm.status === 'vigente' ? 'success' : norm.status === 'derogado' || norm.status === 'parcialmente_derogado' ? 'danger' : 'warn'}>{statusLabel[norm.status] ?? 'No especificado'}</Badge>
+                  <Badge>{typeLabel[norm.type] ?? 'No especificado'}</Badge>
                   <Badge tone={norm.verification === 'verified' ? 'success' : 'warn'}>{norm.verification === 'verified' ? 'Verificada' : 'Pendiente'}</Badge>
                 </div>
                 <h3 className="mt-2 font-display text-[16px] leading-snug text-fg/90">{norm.title}</h3>
@@ -369,7 +390,7 @@ export default function Admin() {
           <div className="flex flex-wrap items-center gap-2">
             {queueQuery.data?.stats.map((stat) => (
               <Badge key={stat.status} tone={stat.status === 'pending' ? 'warn' : stat.status === 'confirmed' ? 'success' : 'neutral'}>
-                {stat.status}: {stat.c}
+                {SpanishLabel(QUEUE_STATUS_LABEL, stat.status)}: {stat.c}
               </Badge>
             ))}
             <button onClick={refreshUpdates} className="btn btn-sm ml-auto"><RefreshCw size={12} /> Buscar cambios</button>
@@ -389,7 +410,7 @@ export default function Admin() {
             {queueQuery.data?.queue.map((update) => (
               <article key={update.id} className="card p-4 sm:p-5">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge tone="warn">{updateTypeLabel[update.type] ?? update.type}</Badge>
+                  <Badge tone="warn">{updateTypeLabel[update.type] ?? 'No especificado'}</Badge>
                   {update.article_number && <Badge tone="gold">Art. {update.article_number}</Badge>}
                   {update.source_name && <Badge>{update.source_name}</Badge>}
                   <span className="ml-auto text-[10px] text-fg/25">{timeAgo(update.detected_at)}</span>
@@ -458,7 +479,7 @@ export default function Admin() {
                   <p className="truncate text-[12.5px] text-fg/85">{student.name}</p>
                   <p className="truncate text-[10px] text-fg/30">{student.email} · {student.university ?? 'Sin universidad'}</p>
                 </div>
-                <Badge tone={student.role === 'admin' ? 'gold' : student.role === 'moderator' ? 'info' : 'neutral'}>{student.role}</Badge>
+                <Badge tone={student.role === 'admin' ? 'gold' : student.role === 'moderator' ? 'info' : 'neutral'}>{SpanishLabel(ROLE_LABEL, student.role)}</Badge>
                 {student.email_verified ? <Badge tone="success">Correo verificado</Badge> : <Badge tone="warn">Correo sin verificar</Badge>}
                 {isAdmin && student.id !== user?.id && (
                   <select
@@ -466,9 +487,9 @@ export default function Admin() {
                     onChange={(event) => changeRole(student.id, event.target.value)}
                     className="input !w-auto !py-1 !text-[11px]"
                   >
-                    <option value="student">student</option>
-                    <option value="moderator">moderator</option>
-                    <option value="admin">admin</option>
+                    <option value="student">Estudiante</option>
+                    <option value="moderator">Moderador</option>
+                    <option value="admin">Administrador</option>
                   </select>
                 )}
               </div>
@@ -487,15 +508,15 @@ export default function Admin() {
           {reportsQuery.data?.reports.map((report) => (
             <div key={report.id} className="card p-4">
               <div className="flex flex-wrap items-center gap-2">
-                <Badge tone={report.status === 'open' ? 'danger' : 'neutral'}>{report.status}</Badge>
-                <Badge>{report.target_type}</Badge>
+                <Badge tone={report.status === 'open' ? 'danger' : 'neutral'}>{SpanishLabel(REPORT_STATUS_LABEL, report.status)}</Badge>
+                <Badge>{SpanishLabel(REPORT_TARGET_LABEL, report.target_type)}</Badge>
                 <span className="ml-auto text-[10px] text-fg/25">{formatDate(report.created_at, { dateStyle: 'medium', timeStyle: 'short' })}</span>
               </div>
               <p className="mt-2 text-[12.5px] text-fg/75">{report.reason}</p>
               <p className="mt-1 text-[10.5px] text-fg/30">Reportado por {report.reporter_name} · objetivo {report.target_id}</p>
               <div className="mt-3 flex flex-wrap gap-2">
                 {['reviewed', 'actioned', 'dismissed'].map((status) => (
-                  <button key={status} onClick={() => setReportStatus(report.id, status)} className="btn btn-sm">{status}</button>
+                  <button key={status} onClick={() => setReportStatus(report.id, status)} className="btn btn-sm">{SpanishLabel(REPORT_STATUS_LABEL, status)}</button>
                 ))}
               </div>
             </div>
@@ -518,7 +539,7 @@ export default function Admin() {
               <tbody className="divide-y divide-fg/[.04]">
                 {auditQuery.data?.audit.map((entry) => (
                   <tr key={entry.id}>
-                    <td className="px-4 py-2.5 text-fg/70">{entry.action}</td>
+                    <td className="px-4 py-2.5 text-fg/70">{SpanishLabel(AUDIT_ACTION_LABEL, entry.action)}</td>
                     <td className="px-4 py-2.5 text-fg/45">{entry.user_name ?? 'Sistema'}</td>
                     <td className="px-4 py-2.5 text-fg/30">{entry.ip ?? '—'}</td>
                     <td className="px-4 py-2.5 text-fg/30">{formatDate(entry.created_at, { dateStyle: 'short', timeStyle: 'short' })}</td>
@@ -581,7 +602,7 @@ export default function Admin() {
           <div>
             <label className="label">Tipo</label>
             <select value={normForm.type} onChange={(event) => setNormForm((value) => ({ ...value, type: event.target.value }))} className="input">
-              {NORM_TYPES.map((type) => <option key={type} value={type}>{typeLabel[type] ?? type}</option>)}
+              {NORM_TYPES.map((type) => <option key={type} value={type}>{typeLabel[type] ?? 'No especificado'}</option>)}
             </select>
           </div>
           <div>
@@ -598,7 +619,7 @@ export default function Admin() {
           <div>
             <label className="label">Estado</label>
             <select value={normForm.status} onChange={(event) => setNormForm((value) => ({ ...value, status: event.target.value }))} className="input">
-              {NORM_STATUSES.map((status) => <option key={status} value={status}>{statusLabel[status] ?? status}</option>)}
+              {NORM_STATUSES.map((status) => <option key={status} value={status}>{statusLabel[status] ?? 'No especificado'}</option>)}
             </select>
           </div>
           <div>
@@ -636,7 +657,7 @@ export default function Admin() {
             <div>
               <label className="label">Estado confirmado</label>
               <select value={verifyForm.status} onChange={(event) => setVerifyForm((value) => ({ ...value, status: event.target.value }))} className="input">
-                {['vigente', 'modificado', 'parcialmente_derogado', 'derogado'].map((status) => <option key={status} value={status}>{statusLabel[status] ?? status}</option>)}
+                {['vigente', 'modificado', 'parcialmente_derogado', 'derogado'].map((status) => <option key={status} value={status}>{statusLabel[status] ?? 'No especificado'}</option>)}
               </select>
             </div>
             <p className="rounded-xl border border-warn/15 bg-warn/[.05] px-3 py-2 text-[10.5px] leading-relaxed text-warn/60">

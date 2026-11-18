@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  AlertTriangle, Bell, Check, Database, KeyRound, Laptop, LogOut, Mail, Moon, Palette,
+  AlertTriangle, Bell, Check, Database, KeyRound, Laptop, LogOut, Mail, MessageCircle, Moon, Palette,
   ShieldCheck, Sparkles, Sun, Users, Video, Newspaper,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -10,6 +10,8 @@ import { api, ApiClientError } from '../lib/api';
 import { useAuth } from '../lib/store';
 import type { User } from '../lib/types';
 import { Badge, SectionHeader, Skeleton } from '../components/ui';
+import { BubbleColorPicker } from '../components/BubbleColorPicker';
+import { useBubbleColors } from '../lib/bubbleColors';
 import { cn, formatDate } from '../lib/utils';
 
 type Area = { slug: string; name: string; description: string; norms: number };
@@ -38,6 +40,7 @@ export default function SettingsPage() {
   const { user, setUser, logout } = useAuth();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const bubbleColors = useBubbleColors();
 
   const [theme, setTheme] = useState<'dark' | 'light'>((user?.theme as 'dark' | 'light') ?? 'dark');
   const [selectedAreas, setSelectedAreas] = useState<string[]>(user?.interests ?? []);
@@ -219,6 +222,19 @@ export default function SettingsPage() {
             <p className="mt-2 text-[10px] leading-relaxed text-fg/30">
               El tema se aplica de inmediato y se guarda en tu cuenta. Ambos modos comparten la misma paleta de marca.
             </p>
+          </section>
+
+          <section className="card p-5">
+            <h2 className="flex items-center gap-2 font-display text-lg text-fg/90"><MessageCircle size={16} className="text-fg/40" /> Colores de mensajería</h2>
+            <p className="mt-1 text-[11.5px] text-fg/35">Personaliza tus burbujas y las de tus contactos con una vista previa antes de aplicarlas.</p>
+            <div className="mt-3">
+              <BubbleColorPicker
+                value={bubbleColors.colors}
+                onChange={(next) => void bubbleColors.update(next)}
+                onReset={() => void bubbleColors.reset()}
+                saving={bubbleColors.saving}
+              />
+            </div>
           </section>
 
           <section className="card p-5">
