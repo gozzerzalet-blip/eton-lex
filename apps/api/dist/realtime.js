@@ -9,6 +9,24 @@ function isMember(conversationId, userId) {
 }
 export function initRealtime(io) {
     setIo(io);
+    const activeCalls = new Map();
+    const clearCall = (callId) => {
+        const call = activeCalls.get(callId);
+        if (call?.timer)
+            clearTimeout(call.timer);
+        activeCalls.delete(callId);
+    };
+    const busyCallFor = (...userIds) => [...activeCalls.values()]
+        .find((call) => userIds.includes(call.callerId) || userIds.includes(call.calleeId));
+    const expireRingingCall = (callId) => {
+        const call = activeCalls.get(callId);
+        if (!call || call.status !== 'ringing')
+            return;
+        clearCall(callId);
+        db.prepare("UPDATE call_history SET status = 'missed', ended_at = datetime('now') WHERE id = ? AND status = 'missed'")
+            .run(callId);
+        io.to(`user:${call.callerId}`).emit('call:missed', { callId });
+    };
     io.use((socket, next) => {
         const token = socket.handshake.auth?.token ?? socket.handshake.headers.authorization?.replace('Bearer ', '');
         if (!token)
@@ -69,10 +87,23 @@ export function initRealtime(io) {
                 return;
             if (!areAcceptedContacts(userId, payload.to))
                 return;
+            if (!payload?.callId || busyCallFor(userId, payload.to)) {
+                io.to(`user:${userId}`).emit('call:busy', { callId: payload?.callId });
+                return;
+            }
             db.prepare(`
         INSERT INTO call_history (id, conversation_id, caller_id, callee_id, kind, status)
         VALUES (?, ?, ?, ?, ?, 'missed')
       `).run(payload.callId, payload.conversationId, userId, payload.to, payload.kind);
+            const state = {
+                id: payload.callId,
+                conversationId: payload.conversationId,
+                callerId: userId,
+                calleeId: payload.to,
+                status: 'ringing',
+            };
+            state.timer = setTimeout(() => expireRingingCall(state.id), 60_000);
+            activeCalls.set(state.id, state);
             io.to(`user:${payload.to}`).emit('call:incoming', {
                 callId: payload.callId,
                 from: { id: userId, name: socket.userName },
@@ -86,6 +117,16 @@ export function initRealtime(io) {
                 return;
             if (!areAcceptedContacts(userId, call.caller_id))
                 return;
+            const state = activeCalls.get(call.id);
+            if (!state) {
+                io.to(`user:${userId}`).emit('call:failed', { callId: call.id, reason: 'expired' });
+                return;
+            }
+            if (state.timer) {
+                clearTimeout(state.timer);
+                state.timer = undefined;
+            }
+            state.status = 'active';
             io.to(`user:${call.caller_id}`).emit('call:accepted', { callId: call.id, by: userId });
         });
         socket.on('call:signal', (payload) => {
@@ -104,7 +145,8 @@ export function initRealtime(io) {
                 return;
             if (!areAcceptedContacts(userId, call.caller_id))
                 return;
-            db.prepare("UPDATE call_history SET status = 'declined', ended_at = datetime('now') WHERE id = ?").run(call.id);
+            db.prepare("UPDATE call_history SET status = 'declined', ended_at = datetime('now') WHERE id = ? AND status != 'completed'").run(call.id);
+            clearCall(call.id);
             io.to(`user:${call.caller_id}`).emit('call:declined', { callId: call.id });
         });
         socket.on('call:end', (payload) => {
@@ -117,6 +159,7 @@ export function initRealtime(io) {
             const duration = Math.max(0, Number(payload.durationS ?? 0));
             db.prepare("UPDATE call_history SET status = 'completed', ended_at = datetime('now'), duration_s = ? WHERE id = ? AND status != 'declined'")
                 .run(duration, call.id);
+            clearCall(call.id);
             io.to(`user:${otherParty}`).emit('call:ended', { callId: call.id });
         });
         // ── Salas: pertenencia, señalización y colaboración ──────────
