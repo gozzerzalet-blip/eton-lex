@@ -90,7 +90,8 @@ usersRouter.get('/lookup', asyncHandler(async (req, res) => {
  * Búsqueda global parcial de personas.
  * Solo devuelve datos públicos del perfil (nombre, usuario, foto y universidad)
  * y nunca mensajes, archivos, correos ni conversaciones. Está disponible aunque
- * no exista amistad, tal como exige el flujo de "agregar amigos".
+ * no exista amistad ni conexión en tiempo real: cualquier cuenta registrada se
+ * puede encontrar y agregar, esté en línea o no.
  */
 usersRouter.get('/search', asyncHandler(async (req, res) => {
     const q = String(req.query.q ?? '').trim();
