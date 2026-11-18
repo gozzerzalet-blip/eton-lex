@@ -73,6 +73,23 @@ export function requireAuth(req, _res, next) {
         return next(unauthorized());
     next();
 }
+/** Token de corta duración para reproducir archivos en elementos <audio>/<video>. */
+export function signFileAccess(userId, documentId) {
+    return jwt.sign({ sub: userId, doc: documentId, scope: 'file-access' }, config.jwtSecret, {
+        expiresIn: '30m',
+    });
+}
+export function verifyFileAccess(token, documentId) {
+    try {
+        const payload = jwt.verify(token, config.jwtSecret);
+        if (payload.scope !== 'file-access' || payload.doc !== documentId || !payload.sub)
+            return null;
+        return payload.sub;
+    }
+    catch {
+        return null;
+    }
+}
 export function requireRole(...roles) {
     return (req, _res, next) => {
         if (!req.user)
@@ -127,6 +144,21 @@ export function relationsFor(viewerId) {
         });
     }
     return map;
+}
+/** Devuelve verdadero solo cuando existe una amistad/contacto aceptado. */
+export function acceptedContactIds(userId) {
+    return db.prepare(`
+    SELECT CASE WHEN requester_id = ? THEN addressee_id ELSE requester_id END AS id
+    FROM friendships
+    WHERE status = 'accepted' AND (requester_id = ? OR addressee_id = ?)
+  `).all(userId, userId, userId).map((row) => row.id);
+}
+export function areAcceptedContacts(a, b) {
+    return Boolean(db.prepare(`
+    SELECT 1 FROM friendships
+    WHERE status = 'accepted'
+      AND ((requester_id = ? AND addressee_id = ?) OR (requester_id = ? AND addressee_id = ?))
+  `).get(a, b, b, a));
 }
 export function canViewProfile(target, viewerId, relations) {
     if (!viewerId)
