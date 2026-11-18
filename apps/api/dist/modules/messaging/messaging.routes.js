@@ -176,6 +176,11 @@ messagingRouter.post('/conversations/:id/messages', asyncHandler(async (req, res
     }
     if (data.oneTime && !data.attachmentId)
         throw badRequest('Selecciona una imagen para enviarla como visualización única.');
+    if (data.replyTo) {
+        const reply = db.prepare('SELECT conversation_id FROM messages WHERE id = ?').get(data.replyTo);
+        if (!reply || reply.conversation_id !== req.params.id)
+            throw badRequest('La respuesta no pertenece a esta conversación.');
+    }
     const id = uuid();
     tx(() => {
         db.prepare(`
@@ -203,6 +208,7 @@ messagingRouter.patch('/messages/:id', asyncHandler(async (req, res) => {
     const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(req.params.id);
     if (!msg)
         throw notFound('Mensaje no encontrado.');
+    ensureMember(msg.conversation_id, req.user.id);
     if (msg.sender_id !== req.user.id)
         throw forbidden();
     db.prepare("UPDATE messages SET body = ?, edited_at = datetime('now') WHERE id = ?").run(body, msg.id);
@@ -213,7 +219,10 @@ messagingRouter.delete('/messages/:id', asyncHandler(async (req, res) => {
     const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(req.params.id);
     if (!msg)
         throw notFound('Mensaje no encontrado.');
-    if (msg.sender_id !== req.user.id && req.user.role !== 'admin')
+    // La privacidad de las conversaciones se aplica también a administradores:
+    // solo un participante puede borrar un mensaje.
+    ensureMember(msg.conversation_id, req.user.id);
+    if (msg.sender_id !== req.user.id)
         throw forbidden();
     db.prepare("UPDATE messages SET deleted_at = datetime('now') WHERE id = ?").run(msg.id);
     emitToConversation(msg.conversation_id, 'message:deleted', { id: msg.id });
