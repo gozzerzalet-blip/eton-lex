@@ -109,7 +109,15 @@ async function main() {
     assert.equal(registerC.status, 201, JSON.stringify(registerC.data));
     const tokenC = registerC.data.accessToken;
     const userC = registerC.data.user;
-    ok('registro real de tres estudiantes');
+    // Este usuario nunca abre un socket: sirve para comprobar que se le puede
+    // encontrar y agregar aunque no esté conectado.
+    const registerD = await request('/api/auth/register', {
+        method: 'POST',
+        body: { name: 'E2E Diego', email: `e2e.diego.${stamp}@etonlex.test`, password: PASSWORD, university: 'UNMSM' },
+    });
+    assert.equal(registerD.status, 201, JSON.stringify(registerD.data));
+    const userD = registerD.data.user;
+    ok('registro real de cuatro estudiantes');
     const me = await request('/api/auth/me', { token: tokenA });
     assert.equal(me.status, 200);
     assert.equal(me.data.user.id, userA.id);
@@ -139,6 +147,15 @@ async function main() {
     assert.equal(foundB.relation, 'none');
     assert.equal(foundB.email, undefined, 'el buscador no debe exponer correos');
     ok('buscador parcial global: perfiles públicos sin amistad y sin datos privados');
+    const offlineSearch = await request(`/api/users/search?q=${encodeURIComponent('E2E Diego')}`, { token: tokenC });
+    assert.equal(offlineSearch.status, 200);
+    const foundD = offlineSearch.data.users.find((row) => row.id === userD.id);
+    assert.ok(foundD, 'el buscador debe encontrar cuentas aunque no estén en línea');
+    const offlineFriendRequest = await request('/api/community/friends/request', {
+        method: 'POST', token: tokenC, body: { userId: userD.id },
+    });
+    assert.equal(offlineFriendRequest.status, 200, JSON.stringify(offlineFriendRequest.data));
+    ok('buscador encuentra y permite agregar usuarios desconectados');
     const profilePublicCard = await request(`/api/users/${userA.id}`, { token: tokenC });
     assert.equal(profilePublicCard.status, 200);
     assert.equal(profilePublicCard.data.user.id, userA.id);
