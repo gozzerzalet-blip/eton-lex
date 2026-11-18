@@ -89,12 +89,13 @@ AI_FALLBACK_MODEL=openai-fast
 AI_FALLBACK_BASE_URL=https://text.pollinations.ai
 AI_WEB_RESEARCH=true
 
-# Recuperación de contraseña por código (Gmail con contraseña de aplicación)
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=465
-SMTP_USER=gozzerzalet@gmail.com
-SMTP_PASS=<APP_PASSWORD_DE_16_CARACTERES>
-SMTP_FROM=ETON LEX <gozzerzalet@gmail.com>
+# Correos transaccionales: Brevo Free (300 correos/día, sin tarjeta)
+# La clave SMTP se genera en Brevo → SMTP keys y se carga como secreto en Suga.
+SMTP_HOST=smtp-relay.brevo.com
+SMTP_PORT=587
+SMTP_USER=<LOGIN_SMTP_DE_BREVO>
+SMTP_PASS=<CLAVE_SMTP_DE_BREVO>
+SMTP_FROM=ETON LEX <correo-verificado-en-brevo>
 
 DEMO_MODE=false
 ```
@@ -172,8 +173,14 @@ registrado** (no solo al del administrador):
   vence en 15 minutos, permite 5 intentos y cierra las sesiones anteriores al cambiar la clave.
 
 Los códigos se guardan solo como hash bcrypt, nunca se muestran en la página ni se devuelven en la
-respuesta. El remitente debe ser la misma cuenta de Gmail autenticada (`SMTP_USER`), porque Gmail
-rechaza remitentes distintos. Los destinatarios pueden ser cualquier correo, no solo Gmail.
+respuesta. El remitente debe ser un remitente verificado en Brevo (`SMTP_FROM`). Los destinatarios
+pueden ser cualquier correo.
+
+**Estado real del despliegue actual:** la cuenta Brevo Free ya está creada y el plan Gratis fue
+seleccionado sin tarjeta, pero la clave SMTP todavía no se cargó en Suga. Por eso
+`/api/system/capabilities` sigue reportando `email.configured: false` y los formularios responden
+**503** con un mensaje honesto. Gmail con contraseña de aplicación quedó descartado porque Google
+pidió verificación adicional. No se simula el envío ni se muestran códigos.
 
 Si `SMTP_PASS` no está configurado, `/api/system/capabilities` reporta
 `email.configured: false`, `email.passwordReset: false`, `email.emailVerification: false` y
@@ -202,10 +209,18 @@ en el environment.
 - 1 GB de almacenaje compartido entre base de datos, uploads y backups. Por eso
   `MAX_UPLOAD_MB=10`.
 - 5 Mbit/s de salida: las descargas grandes son lentas.
-- El plan Free no incluye dominio propio ni correo SMTP. La verificación, el ingreso por código
-  y la recuperación dependen de las variables `SMTP_*` (Gmail con contraseña de aplicación);
-  sin ellas no se activan.
-- TURN no está configurado; las llamadas funcionan P2P y pueden fallar en NAT estricto.
+- El plan Free no incluye dominio propio ni servidor de correo propio. La verificación, el ingreso
+  por código y la recuperación dependen de las variables `SMTP_*` cargadas con Brevo Free; sin
+  ellas no se activan.
+- TURN no está configurado; las llamadas y salas funcionan P2P con STUN y pueden fallar en NAT
+  estricto o redes corporativas. TURN requiere un servicio externo (por ejemplo, un servidor
+  coturn propio o un proveedor administrado) y puede tener costo.
+- Las salas usan malla P2P, no SFU. Para grupos grandes se requiere un SFU externo (por ejemplo,
+  mediasoup o LiveKit); eso implica otro servicio y recursos adicionales. La interfaz lo indica
+  honestamente como “WebRTC · malla P2P”.
+- La captura de audio de pantalla/window depende del navegador, del sistema operativo y de que la
+  persona marque “compartir audio del sistema” en el selector. Cuando no hay pista de audio, la
+  interfaz lo informa; nunca se simula sonido.
 - Un solo replica porque SQLite vive en el volumen.
 - Los backups están dentro del mismo volumen: protegen contra borrados accidentales, no contra
   la pérdida del proveedor.
