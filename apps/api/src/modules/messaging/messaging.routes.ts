@@ -188,6 +188,10 @@ messagingRouter.post('/conversations/:id/messages', asyncHandler(async (req, res
     if (data.oneTime && !doc.mime.startsWith('image/')) throw badRequest('Las fotos de visualización única deben ser imágenes.');
   }
   if (data.oneTime && !data.attachmentId) throw badRequest('Selecciona una imagen para enviarla como visualización única.');
+  if (data.replyTo) {
+    const reply = db.prepare('SELECT conversation_id FROM messages WHERE id = ?').get(data.replyTo) as { conversation_id: string } | undefined;
+    if (!reply || reply.conversation_id !== req.params.id) throw badRequest('La respuesta no pertenece a esta conversación.');
+  }
 
   const id = uuid();
   tx(() => {
@@ -221,6 +225,7 @@ messagingRouter.patch('/messages/:id', asyncHandler(async (req, res) => {
   const { body } = z.object({ body: z.string().trim().min(1).max(6000) }).parse(req.body);
   const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(req.params.id) as any;
   if (!msg) throw notFound('Mensaje no encontrado.');
+  ensureMember(msg.conversation_id, req.user!.id);
   if (msg.sender_id !== req.user!.id) throw forbidden();
   db.prepare("UPDATE messages SET body = ?, edited_at = datetime('now') WHERE id = ?").run(body, msg.id);
   emitToConversation(msg.conversation_id, 'message:updated', { id: msg.id, body, editedAt: new Date().toISOString() });
@@ -230,7 +235,10 @@ messagingRouter.patch('/messages/:id', asyncHandler(async (req, res) => {
 messagingRouter.delete('/messages/:id', asyncHandler(async (req, res) => {
   const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(req.params.id) as any;
   if (!msg) throw notFound('Mensaje no encontrado.');
-  if (msg.sender_id !== req.user!.id && req.user!.role !== 'admin') throw forbidden();
+  // La privacidad de las conversaciones se aplica también a administradores:
+  // solo un participante puede borrar un mensaje.
+  ensureMember(msg.conversation_id, req.user!.id);
+  if (msg.sender_id !== req.user!.id) throw forbidden();
   db.prepare("UPDATE messages SET deleted_at = datetime('now') WHERE id = ?").run(msg.id);
   emitToConversation(msg.conversation_id, 'message:deleted', { id: msg.id });
   res.json({ ok: true });
