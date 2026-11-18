@@ -333,8 +333,10 @@ biblioteca con el artículo transcrito.
   `provider=pollinations`, `libraryMode=false` en el primer `meta`, sin evento
   `error`, y una explicación redactada por el modelo sobre la posesión.
 - `npm run build`: OK (`index-D3SJ0-xx.js`, `index-ceP4-9cu.css`).
-- `npm run deploy:check`: OK antes del despliegue de esta corrección; seguía
-  informando «IA: no configurada» porque Suga aún servía la versión anterior.
+- `npm run deploy:check`: OK. Después del despliegue automático, Suga sirve
+  `index-D3SJ0-xx.js` y `/api/system/capabilities` informa
+  `ai.configured=true`, `provider=pollinations`, `model=openai-fast`.
+- Commit publicado: `a0ade7b` en `main`.
 
 ## Reglas que se mantienen en todas las fases
 
