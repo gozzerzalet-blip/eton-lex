@@ -502,30 +502,48 @@ h3 {
   .prose-eton hr { border-color: var(--border); margin: 1.5em 0; }
 }
 
-/* Burbujas de mensajería */
-.bubble-me {
-  background: #0a0a0a;
-  color: #ffffff;
-  border-radius: 20px 20px 6px 20px;
-  box-shadow: 0 10px 24px -20px rgba(0, 0, 0, 0.8);
+/* Burbujas de mensajería: proporciones y terminación inspiradas en iMessage.
+   El color de fondo se puede sobrescribir desde la preferencia del usuario. */
+.bubble-me,
+.bubble-other {
+  position: relative;
+  border-radius: 16px;
+  transition: background-color 180ms ease, color 180ms ease;
 }
-.dark .bubble-me {
-  background: #f4f4f6;
-  color: #0a0a0b;
+.bubble-me {
+  background-color: #0b84ff;
+  color: #ffffff;
+  border-bottom-right-radius: 5px;
+  box-shadow: 0 10px 24px -20px rgba(11, 132, 255, 0.85);
 }
 .bubble-other {
-  background: rgba(255, 255, 255, 0.78);
-  -webkit-backdrop-filter: blur(14px);
-  backdrop-filter: blur(14px);
-  border: 1px solid rgba(10, 10, 10, 0.07);
-  border-radius: 20px 20px 20px 6px;
-  color: var(--text);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 10px 24px -24px rgba(10, 10, 10, 0.45);
+  background-color: #e9e9ec;
+  color: #111214;
+  border-bottom-left-radius: 5px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65), 0 10px 24px -24px rgba(10, 10, 10, 0.45);
 }
 .dark .bubble-other {
-  background: rgba(255, 255, 255, 0.07);
-  border-color: rgba(255, 255, 255, 0.1);
+  background-color: #2c2c30;
+  color: #f4f4f6;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.bubble-me::after,
+.bubble-other::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  width: 8px;
+  height: 10px;
+  background-color: inherit;
+  pointer-events: none;
+}
+.bubble-me::after {
+  right: -4px;
+  clip-path: polygon(0 0, 100% 100%, 0 100%);
+}
+.bubble-other::after {
+  left: -4px;
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
 }
 
 /* Ocultar barra en móviles */

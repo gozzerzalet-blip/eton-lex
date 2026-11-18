@@ -72,6 +72,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    document.documentElement.lang = 'es-PE';
+  }, []);
+
+  useEffect(() => {
     const theme = (user as { theme?: string } | null)?.theme;
     const stored = localStorage.getItem('eton-theme');
     const dark = (theme ?? stored ?? 'light') === 'dark';
