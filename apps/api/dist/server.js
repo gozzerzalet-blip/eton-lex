@@ -18,7 +18,7 @@ const io = new Server(server, {
 initRealtime(io);
 // ── Procesos automáticos (reales, solo si hay fuentes configuradas) ──
 if (config.news.feeds.length > 0 || config.news.newsApiKey) {
-    cron.schedule('*/20 * * * *', async () => {
+    cron.schedule('*/2 * * * *', async () => {
         try {
             const r = await ingestNews();
             console.log(`[news] ${r.inserted} nuevas, ${r.skipped} repetidas, ${r.errors.length} errores`);
@@ -27,7 +27,7 @@ if (config.news.feeds.length > 0 || config.news.newsApiKey) {
             console.error('[news] error', err.message);
         }
     });
-    console.log('· ETON NEWS: actualización automática cada 20 minutos.');
+    console.log('· ETON NEWS: comprobación automática cada 2 minutos; noticias nuevas en tiempo real.');
 }
 else {
     console.log('· ETON NEWS: sin fuentes configuradas (NEWS_FEEDS). No se generan noticias.');
