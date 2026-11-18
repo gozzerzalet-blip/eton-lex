@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Archive, ArrowLeft, BellOff, Camera, Check, CheckCheck, Copy, Download, Eye, FileText, Forward,
+  Archive, ArrowLeft, BellOff, Camera, Check, CheckCheck, Copy, Eye, FileText, Forward,
   Image as ImageIcon, Info, Lock, MessageSquare, Mic, MicOff, MonitorOff, MonitorUp, MoreHorizontal,
   Palette, Paperclip, Pause, Phone, PhoneCall, Pin, Play, Search, Send, Smile, Square, Trash2, UserPlus, Video,
   VideoOff, Volume2, X, Users, Plus,
@@ -124,7 +124,7 @@ function AuthedImage({ path, name, className }: { path: string; name?: string; c
   );
 }
 
-function AudioNote({ fileId, name }: { fileId: string; name?: string }) {
+function AudioNote({ fileId }: { fileId: string }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [src, setSrc] = useState<string | null>(null);
   const [audioError, setAudioError] = useState(false);
@@ -193,7 +193,7 @@ function AudioNote({ fileId, name }: { fileId: string; name?: string }) {
   const progress = duration > 0 ? Math.min(1, current / duration) : 0;
 
   return (
-    <div className="w-[min(15rem,58vw)] select-none">
+    <div className="w-[min(10.5rem,48vw)] select-none">
       <audio
         ref={audioRef}
         src={src ?? undefined}
@@ -213,19 +213,19 @@ function AudioNote({ fileId, name }: { fileId: string; name?: string }) {
         onPause={() => setPlaying(false)}
         onError={() => { setAudioError(true); refreshUrl(); }}
       />
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1.5">
         <button
           type="button"
           onClick={toggle}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/90 text-[#111214] shadow-[0_6px_16px_-10px_rgba(0,0,0,.9)] transition-transform hover:scale-105 dark:bg-white/95"
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/90 text-[#111214] shadow-[0_6px_16px_-10px_rgba(0,0,0,.9)] transition-transform hover:scale-105 dark:bg-white/95"
           aria-label={playing ? 'Pausar nota de voz' : 'Reproducir nota de voz'}
           title={playing ? 'Pausar' : 'Reproducir'}
         >
-          {playing ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" className="ml-0.5" />}
+          {playing ? <Pause size={11} fill="currentColor" /> : <Play size={11} fill="currentColor" className="ml-0.5" />}
         </button>
 
         <div className="min-w-0 flex-1">
-          <div className="relative flex h-6 items-end gap-[1.5px]">
+          <div className="relative flex h-4 items-end gap-[1px]">
             {waveform.map((height, index) => (
               <span
                 key={index}
@@ -248,36 +248,24 @@ function AudioNote({ fileId, name }: { fileId: string; name?: string }) {
               aria-valuetext={`${formatClock(current)} de ${formatClock(duration)}`}
             />
           </div>
-          <div className="mt-0.5 flex items-center justify-between text-[8.5px] tabular-nums opacity-50">
+          <div className="mt-0.5 flex items-center justify-between text-[8px] tabular-nums opacity-50">
             <span>{formatClock(current)}</span>
             <span>{formatClock(duration)}</span>
           </div>
         </div>
 
-        <div className="flex shrink-0 flex-col items-center gap-1">
-          <button
-            type="button"
-            onClick={cycleRate}
-            className="rounded-full border border-current px-1 py-0 text-[8.5px] font-semibold tabular-nums opacity-75 transition-opacity hover:opacity-100"
-            title="Velocidad de reproducción"
-            aria-label={`Velocidad de reproducción: ${rate}x`}
-          >
-            {rate}x
-          </button>
-          <a
-            href={src ?? '#'}
-            onClick={(event) => { if (!src) event.preventDefault(); }}
-            download={name ?? 'nota-de-voz.webm'}
-            className="rounded-full p-0.5 opacity-50 transition-opacity hover:opacity-100"
-            title="Descargar nota de voz"
-            aria-label="Descargar nota de voz"
-          >
-            <Download size={11} />
-          </a>
-        </div>
+        <button
+          type="button"
+          onClick={cycleRate}
+          className="shrink-0 rounded-full border border-current px-1 py-0 text-[8px] font-semibold tabular-nums opacity-75 transition-opacity hover:opacity-100"
+          title="Velocidad de reproducción"
+          aria-label={`Velocidad de reproducción: ${rate}x`}
+        >
+          {rate}x
+        </button>
       </div>
       {audioError && (
-        <div className="mt-1 flex items-center gap-2 text-[9.5px] italic opacity-65">
+        <div className="mt-1 flex items-center gap-2 text-[9px] italic opacity-65">
           Audio no disponible
           <button type="button" onClick={refreshUrl} className="underline">Reintentar</button>
         </div>
@@ -1653,7 +1641,7 @@ export default function Messages() {
         body: JSON.stringify({
           kind,
           attachmentId: document.id,
-          body: kind === 'image' ? undefined : document.name,
+          body: kind === 'image' || kind === 'audio' ? undefined : document.name,
           replyTo: replyTo?.id ?? null,
         }),
       });
@@ -2281,7 +2269,7 @@ export default function Messages() {
                         ) : null}
 
                         {message.attachment && (message.kind === 'audio' || message.attachment.mime.startsWith('audio/')) && (
-                          <AudioNote fileId={message.attachment.id} name={message.attachment.name} />
+                          <AudioNote fileId={message.attachment.id} />
                         )}
                         {message.attachment && message.kind === 'file' && (
                           <a href={`/api/files/${message.attachment.id}`} target="_blank" rel="noreferrer" className={cn('flex items-center gap-2 rounded-lg px-2 py-1.5', mine ? 'bg-white/10 hover:bg-white/20' : 'bg-black/[.05] hover:bg-black/[.09]')}>
@@ -2293,7 +2281,7 @@ export default function Messages() {
                           </a>
                         )}
 
-                        {message.body && !sticker && !isImageAttachment && (message.kind !== 'file' || message.body !== message.attachment?.name) && (
+                        {message.body && !sticker && !isImageAttachment && message.kind !== 'audio' && !message.attachment?.mime.startsWith('audio/') && (message.kind !== 'file' || message.body !== message.attachment?.name) && (
                           <p className="whitespace-pre-wrap break-words">{message.body}</p>
                         )}
                       </>
