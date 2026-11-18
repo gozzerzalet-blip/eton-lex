@@ -27,6 +27,7 @@ export type User = {
   onboarded?: boolean;
   emailVerified?: boolean;
   privacy?: { profile?: 'community' | 'friends' | 'private'; activity?: 'friends' | 'private' };
+  bubbleColors?: { mine: string; other: string };
 };
 
 export type Norm = {
