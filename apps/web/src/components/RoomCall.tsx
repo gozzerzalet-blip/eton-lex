@@ -4,7 +4,7 @@ import {
   Camera, CameraOff, Mic, MicOff, MonitorOff, MonitorUp, Sparkles, Video, Volume2, VolumeX,
 } from 'lucide-react';
 import { api } from '../lib/api';
-import { getSocket } from '../lib/socket';
+import { useSocket } from '../lib/socket';
 import { cn } from '../lib/utils';
 
 type CallMember = { id: string; name: string; avatar_url?: string | null };
@@ -132,7 +132,7 @@ export default function RoomCall({ roomId, members, userId, userName }: {
   userId: string;
   userName: string;
 }) {
-  const socket = getSocket();
+  const socket = useSocket();
   const socketRef = useRef<Socket | null>(socket);
   socketRef.current = socket;
 

@@ -4,7 +4,7 @@ import {
   ArrowUpRight, Circle, Eraser, MousePointer2, Paintbrush, Plus, Square, Type,
 } from 'lucide-react';
 import { api } from '../lib/api';
-import { getSocket } from '../lib/socket';
+import { useSocket } from '../lib/socket';
 import { cn } from '../lib/utils';
 
 type Point = { x: number; y: number };
@@ -141,7 +141,7 @@ export default function Whiteboard({ roomId, initialPages, initialElements, user
   initialElements: BoardElement[];
   userId: string;
 }) {
-  const socket = getSocket();
+  const socket = useSocket();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const strokeRef = useRef<Stroke | null>(null);

@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
-import { getSocket } from '../lib/socket';
+import { useSocket } from '../lib/socket';
 import { useAuth } from '../lib/store';
 import type { Notification } from '../lib/types';
 import { cn, timeAgo } from '../lib/utils';
@@ -64,8 +64,9 @@ export default function Layout() {
     refetchInterval: 60_000,
   });
 
+  const socket = useSocket();
+
   useEffect(() => {
-    const socket = getSocket();
     if (!socket) return;
     const onNotification = (n: Notification) => {
       toast(n.title, { description: n.body ?? undefined });
@@ -81,7 +82,7 @@ export default function Layout() {
       socket.off('notification:new', onNotification);
       socket.off('conversation:activity', onMessage);
     };
-  }, [queryClient]);
+  }, [queryClient, socket]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
