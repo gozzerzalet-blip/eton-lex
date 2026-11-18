@@ -149,9 +149,19 @@ async function main() {
   assert.equal(listBefore.data.users.length, 0);
   ok('API no revela cuentas que no son contactos');
 
-  const profileDenied = await request(`/api/users/${userA.id}`, { token: tokenC });
-  assert.equal(profileDenied.status, 404);
-  ok('perfil privado rechazado por identificador manipulado');
+  const globalSearch = await request(`/api/users/search?q=${encodeURIComponent('E2E Rafael')}`, { token: tokenC });
+  assert.equal(globalSearch.status, 200);
+  const foundB = globalSearch.data.users.find((row: Json) => row.id === userB.id);
+  assert.ok(foundB, 'el buscador debe encontrar a un usuario que aún no es amigo');
+  assert.equal(foundB.relation, 'none');
+  assert.equal(foundB.email, undefined, 'el buscador no debe exponer correos');
+  ok('buscador parcial global: perfiles públicos sin amistad y sin datos privados');
+
+  const profilePublicCard = await request(`/api/users/${userA.id}`, { token: tokenC });
+  assert.equal(profilePublicCard.status, 200);
+  assert.equal(profilePublicCard.data.user.id, userA.id);
+  assert.equal(profilePublicCard.data.user.email, undefined, 'la ficha pública no debe exponer correo');
+  ok('perfil visible para enviar solicitud, sin exponer datos privados');
 
   const presenceC = waitFor<Json>(socketCPrivacy, 'presence:list');
   socketCPrivacy.emit('presence:sync');
@@ -174,6 +184,16 @@ async function main() {
     method: 'POST', token: tokenA, body: { userId: userB.id },
   });
   assert.equal(friendRequest.status, 200, JSON.stringify(friendRequest.data));
+  const duplicateRequest = await request('/api/community/friends/request', {
+    method: 'POST', token: tokenA, body: { userId: userB.id },
+  });
+  assert.equal(duplicateRequest.status, 409);
+  const selfRequest = await request('/api/community/friends/request', {
+    method: 'POST', token: tokenA, body: { userId: userA.id },
+  });
+  assert.equal(selfRequest.status, 400);
+  ok('solicitudes duplicadas y autom solicitudes rechazadas en servidor');
+
   const friendsB = await request('/api/community/friends', { token: tokenB });
   const requestId = friendsB.data.incoming.find((row: Json) => row.id === userA.id)?.request_id as string;
   assert.ok(requestId);
@@ -247,6 +267,25 @@ async function main() {
   assert.equal(conversation.status, 201);
   const conversationId = conversation.data.conversation.id as string;
 
+  const duplicateConversation = await request('/api/messaging/conversations', {
+    method: 'POST', token: tokenA, body: { type: 'direct', memberIds: [userB.id] },
+  });
+  assert.equal(duplicateConversation.status, 200);
+  assert.equal(duplicateConversation.data.conversation.id, conversationId);
+  ok('conversación directa estable y sin duplicados');
+
+  const nonFriendConversation = await request('/api/messaging/conversations', {
+    method: 'POST', token: tokenC, body: { type: 'direct', memberIds: [userB.id] },
+  });
+  assert.equal(nonFriendConversation.status, 403);
+  const cReadsAb = await request(`/api/messaging/conversations/${conversationId}/messages`, { token: tokenC });
+  assert.equal(cReadsAb.status, 403);
+  const cOpensAb = await request(`/api/messaging/conversations/${conversationId}`, { token: tokenC });
+  assert.equal(cOpensAb.status, 403);
+  const manipulatedId = await request(`/api/messaging/conversations/${crypto.randomUUID()}/messages`, { token: tokenC });
+  assert.equal(manipulatedId.status, 403);
+  ok('tercero y URI manipulada no acceden a conversación ajena');
+
   const socketB = socketBPrivacy;
   ok('dos sesiones Socket.IO autenticadas');
 
@@ -282,6 +321,38 @@ async function main() {
   const read = await request(`/api/messaging/conversations/${conversationId}/read`, { method: 'POST', token: tokenB });
   assert.equal(read.status, 200);
   ok('reacciones y confirmación de lectura persistidas');
+
+  const cEdits = await request(`/api/messaging/messages/${sent.data.message.id}`, {
+    method: 'PATCH', token: tokenC, body: { body: 'manipulado' },
+  });
+  assert.equal(cEdits.status, 403);
+  const cDeletes = await request(`/api/messaging/messages/${sent.data.message.id}`, {
+    method: 'DELETE', token: tokenC,
+  });
+  assert.equal(cDeletes.status, 403);
+  ok('edición y borrado de mensajes exigen pertenencia a la conversación');
+
+  // Marcela (B) y Roberto (C) también pueden ser amigos; Andrea (A) no debe
+  // poder leer esa conversación aunque conozca el identificador.
+  const bcRequest = await request('/api/community/friends/request', {
+    method: 'POST', token: tokenC, body: { userId: userB.id },
+  });
+  assert.equal(bcRequest.status, 200);
+  const friendsB2 = await request('/api/community/friends', { token: tokenB });
+  const bcRequestId = friendsB2.data.incoming.find((row: Json) => row.id === userC.id)?.request_id as string;
+  assert.ok(bcRequestId);
+  const bcAccept = await request(`/api/community/friends/${bcRequestId}/respond`, {
+    method: 'POST', token: tokenB, body: { action: 'accept' },
+  });
+  assert.equal(bcAccept.status, 200);
+  const bcConversation = await request('/api/messaging/conversations', {
+    method: 'POST', token: tokenB, body: { type: 'direct', memberIds: [userC.id] },
+  });
+  assert.equal(bcConversation.status, 201);
+  const bcId = bcConversation.data.conversation.id as string;
+  const aReadsBc = await request(`/api/messaging/conversations/${bcId}/messages`, { token: tokenA });
+  assert.equal(aReadsBc.status, 403);
+  ok('A no lee la conversación privada B-C aunque conozca su ID');
 
   // ── Notificaciones ──────────────────────────────────────────
   const notifications = await request('/api/notifications', { token: tokenB });
@@ -447,6 +518,20 @@ async function main() {
     assert.equal(unavailable.status, 503);
     ok('recuperación honestamente suspendida hasta configurar SMTP');
   }
+
+  // ── Privacidad tras cerrar sesión y volver a entrar ───────────
+  const relogin = await request('/api/auth/login', {
+    method: 'POST',
+    body: { email: `e2e.andrea.${stamp}@etonlex.test`, password: PASSWORD },
+  });
+  assert.equal(relogin.status, 200);
+  const tokenAAfter = relogin.data.accessToken as string;
+  const afterRelogin = await request(`/api/messaging/conversations/${conversationId}/messages`, { token: tokenAAfter });
+  assert.equal(afterRelogin.status, 200);
+  assert.ok(afterRelogin.data.messages.some((m: Json) => m.id === sent.data.message.id));
+  const strangerAfterRelogin = await request(`/api/messaging/conversations/${conversationId}/messages`, { token: tokenC });
+  assert.equal(strangerAfterRelogin.status, 403);
+  ok('historial privado sigue accesible al dueño y protegido tras nuevo ingreso');
 
   // ── Cierre ──────────────────────────────────────────────────
   socketA.disconnect();
