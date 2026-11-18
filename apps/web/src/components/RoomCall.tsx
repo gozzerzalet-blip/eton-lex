@@ -716,9 +716,9 @@ export default function RoomCall({ roomId, members, userId, userName }: {
           </button>
           {deviceList.filter((device) => device.kind === 'audioinput').length > 1 && (
             <label className="flex items-center gap-1 rounded-full border border-white/15 bg-white/[.08] px-2.5 py-2 text-[10px] text-white/70">
-              Mic
+              Micrófono
               <select value={audioInputId} onChange={(event) => void switchMic(event.target.value)} className="max-w-[100px] bg-transparent text-white/80 outline-none [&>option]:bg-[#101013]">
-                {deviceList.filter((device) => device.kind === 'audioinput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Mic ${index + 1}`}</option>)}
+                {deviceList.filter((device) => device.kind === 'audioinput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Micrófono ${index + 1}`}</option>)}
               </select>
             </label>
           )}
