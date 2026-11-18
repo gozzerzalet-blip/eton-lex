@@ -100,6 +100,14 @@ export function migrate() {
     const sourceColumns = new Set(db.prepare('PRAGMA table_info(sources)').all().map((c) => c.name));
     if (!sourceColumns.has('last_error'))
         db.exec('ALTER TABLE sources ADD COLUMN last_error TEXT');
+    // Las fuentes internacionales pasaron a ser todas en español. Los titulares
+    // anteriores venían de fuentes en inglés: se retiran una sola vez y la ingesta
+    // siguiente los repuebla con las fuentes hispanohablantes.
+    db.exec("CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+    if (!db.prepare("SELECT 1 FROM schema_meta WHERE key = 'news_sources_spanish'").get()) {
+        db.exec("DELETE FROM news WHERE scope = 'internacional'");
+        db.prepare("INSERT INTO schema_meta (key) VALUES ('news_sources_spanish')").run();
+    }
 }
 export const now = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
 export const uuid = () => crypto.randomUUID();
