@@ -162,6 +162,20 @@ export function parsePrivacy(raw?: string | null) {
   }
 }
 
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+
+export function parseBubbleColors(raw?: string | null): { mine: string; other: string } | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object'
+      && HEX_COLOR.test(parsed.mine ?? '') && HEX_COLOR.test(parsed.other ?? '')) {
+      return { mine: parsed.mine, other: parsed.other };
+    }
+  } catch { /* preferencia antigua o inválida: se ignora */ }
+  return undefined;
+}
+
 export function relationsFor(viewerId: string): Map<string, { status: RelationStatus; direction: 'incoming' | 'outgoing' }> {
   const rows = db.prepare(`
     SELECT requester_id, addressee_id, status FROM friendships
@@ -218,7 +232,7 @@ export function publicUser(userId: string, includePrivate = false, viewerId?: st
   const row = db.prepare(`
     SELECT id, name, email, avatar_url, cover_url, username, public_id, university, university_id, campus_id,
            university_type, faculty, career, country, city, cycle, bio, links, privacy_fields,
-           role, created_at, last_seen_at, theme, privacy, onboarded, email_verified
+           role, created_at, last_seen_at, theme, privacy, onboarded, email_verified, bubble_colors
     FROM users WHERE id = ?
   `).get(userId) as any;
   if (!row) return null;
@@ -267,6 +281,7 @@ export function publicUser(userId: string, includePrivate = false, viewerId?: st
           theme: row.theme ?? 'dark',
           privacy,
           privacyFields: fields,
+          bubbleColors: parseBubbleColors(row.bubble_colors),
           onboarded: Boolean(row.onboarded),
           emailVerified: Boolean(row.email_verified),
         }
