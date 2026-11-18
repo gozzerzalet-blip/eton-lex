@@ -2481,7 +2481,7 @@ export default function Messages() {
                   )}
                 </div>
               )}
-              <p className="text-[10px] leading-relaxed text-fg/25">Solo se muestran datos públicos. Nunca compartimos correos ni mensajes.</p>
+              <p className="text-[10px] leading-relaxed text-fg/25">Encuentra a cualquier estudiante registrado, esté en línea o no. Solo se muestran datos públicos; nunca correos ni mensajes.</p>
             </>
           ) : (
             <div className="space-y-3">
