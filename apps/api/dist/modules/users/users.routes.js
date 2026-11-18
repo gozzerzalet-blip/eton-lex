@@ -1,45 +1,35 @@
 import { Router } from 'express';
 import { db } from '../../db/index.js';
-import { canViewProfile, fieldAllowed, parsePrivacyFields, publicUser, relationsFor, requireAuth } from '../../lib/auth.js';
+import { acceptedContactIds, fieldAllowed, parsePrivacyFields, publicUser, relationsFor, requireAuth } from '../../lib/auth.js';
 import { asyncHandler, notFound } from '../../lib/http.js';
 export const usersRouter = Router();
 usersRouter.use(requireAuth);
 usersRouter.get('/', asyncHandler(async (req, res) => {
     const q = String(req.query.q ?? '').trim();
-    const university = String(req.query.university ?? '').trim();
-    const career = String(req.query.career ?? '').trim();
     const limit = Math.min(Number(req.query.limit ?? 20) || 20, 50);
-    const where = ['u.id != ?'];
-    const params = [req.user.id];
+    const contacts = acceptedContactIds(req.user.id);
+    if (contacts.length === 0) {
+        res.json({ users: [], contactsOnly: true });
+        return;
+    }
+    const placeholders = contacts.map(() => '?').join(',');
+    const where = [`u.id IN (${placeholders})`];
+    const params = [...contacts];
     if (q) {
-        where.push(`(u.name LIKE ? OR u.username LIKE ? OR u.public_id LIKE ? OR u.university LIKE ? OR u.career LIKE ? OR u.email LIKE ?)`);
-        params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
+        // Búsqueda restringida al propio conjunto de contactos aceptados.
+        where.push(`(u.name LIKE ? OR u.username LIKE ? OR u.public_id LIKE ? OR u.email LIKE ?)`);
+        params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
     }
-    if (university) {
-        where.push('(u.university = ? OR u.university_id = ?)');
-        params.push(university, university);
-    }
-    if (career) {
-        where.push('u.career LIKE ?');
-        params.push(`%${career}%`);
-    }
-    const me = db.prepare('SELECT university_id, career FROM users WHERE id = ?').get(req.user.id);
     const rows = db.prepare(`
-    SELECT u.id, u.name, u.username, u.public_id, u.avatar_url, u.university, u.university_id,
-           u.university_type, u.faculty, u.career, u.city, u.cycle, u.bio,
-           u.privacy, u.privacy_fields,
-           CASE WHEN u.university_id = ? THEN 2 ELSE 0 END +
-           CASE WHEN u.career = ? THEN 1 ELSE 0 END AS affinity
+    SELECT u.id, u.name, u.username, u.public_id, u.avatar_url, u.university,
+           u.cycle, u.privacy, u.privacy_fields
     FROM users u WHERE ${where.join(' AND ')}
-    ORDER BY affinity DESC, u.name LIMIT ?
-  `).all(me?.university_id ?? null, me?.career ?? null, ...params, limit);
+    ORDER BY u.name LIMIT ?
+  `).all(...params, limit);
     const relations = relationsFor(req.user.id);
-    const users = rows
-        .filter((row) => canViewProfile(row, req.user.id, relations))
-        .map((u) => {
+    const users = rows.map((u) => {
         const privacy = parsePrivacyFields(u.privacy_fields);
-        const isFriend = relations.get(u.id)?.status === 'accepted';
-        const visible = (key) => fieldAllowed(privacy[key] ?? 'everyone', false, isFriend);
+        const visible = (key) => fieldAllowed(privacy[key] ?? 'everyone', false, true);
         return {
             id: u.id,
             name: u.name,
@@ -47,28 +37,59 @@ usersRouter.get('/', asyncHandler(async (req, res) => {
             publicId: u.public_id,
             avatarUrl: u.avatar_url,
             university: visible('university') ? u.university : undefined,
-            universityId: visible('university') ? u.university_id : undefined,
-            universityType: visible('university') ? u.university_type : undefined,
-            faculty: visible('faculty') ? u.faculty : undefined,
-            career: visible('career') ? u.career : undefined,
-            city: visible('city') ? u.city : undefined,
             cycle: visible('cycle') ? u.cycle : undefined,
-            bio: visible('bio') ? u.bio : undefined,
-            relation: relations.get(u.id)?.status ?? null,
-            affinity: u.affinity,
+            relation: relations.get(u.id)?.status ?? 'accepted',
+            affinity: 0,
         };
     });
-    res.json({ users });
+    res.json({ users, contactsOnly: true });
 }));
-usersRouter.get('/universities', asyncHandler(async (_req, res) => {
+usersRouter.get('/universities', asyncHandler(async (req, res) => {
+    const contacts = acceptedContactIds(req.user.id);
+    if (contacts.length === 0) {
+        res.json({ universities: [] });
+        return;
+    }
+    const placeholders = contacts.map(() => '?').join(',');
     const rows = db.prepare(`
     SELECT university, COUNT(*) AS students FROM users
-    WHERE university IS NOT NULL AND university != ''
+    WHERE university IS NOT NULL AND university != '' AND id IN (${placeholders})
     GROUP BY university ORDER BY students DESC, university ASC
-  `).all();
+  `).all(...contacts);
     res.json({ universities: rows });
 }));
+/** Búsqueda exacta para agregar contactos: nunca devuelve listados generales. */
+usersRouter.get('/lookup', asyncHandler(async (req, res) => {
+    const q = String(req.query.q ?? '').trim();
+    if (q.length < 4) {
+        res.json({ user: null });
+        return;
+    }
+    const row = db.prepare(`
+    SELECT id, name, username, public_id, avatar_url, university, cycle
+    FROM users WHERE public_id = ? OR username = ? OR email = ? LIMIT 1
+  `).get(q, q, q);
+    if (!row || row.id === req.user.id) {
+        res.json({ user: null });
+        return;
+    }
+    res.json({
+        user: {
+            id: row.id,
+            name: row.name,
+            username: row.username,
+            publicId: row.public_id,
+            avatarUrl: row.avatar_url,
+            university: row.university,
+            cycle: row.cycle,
+            relation: relationsFor(req.user.id).get(row.id)?.status ?? null,
+        },
+    });
+}));
 usersRouter.get('/:id', asyncHandler(async (req, res) => {
+    if (req.params.id !== req.user.id && !acceptedContactIds(req.user.id).includes(req.params.id)) {
+        throw notFound('Estudiante no encontrado.');
+    }
     const profile = publicUser(req.params.id, false, req.user.id);
     if (!profile)
         throw notFound('Estudiante no encontrado.');
