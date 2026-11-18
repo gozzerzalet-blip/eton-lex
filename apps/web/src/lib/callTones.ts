@@ -1,13 +1,13 @@
 /**
  * Tonos locales de llamada generados con Web Audio API.
  *
- * Timbre tipo marimba: ataque muy corto, parciales suaves y caída natural.
- * Busca una sensación parecida a los tonos modernos de móvil sin reproducir
+ * Timbre melódico suave, con ataque gradual, armónicos cálidos y vibrato
+ * ligero: busca la sensación de un tono moderno de móvil, sin reproducir
  * ninguna melodía protegida. No descarga archivos y se detiene al cambiar
  * el estado de la llamada.
  */
 type RingRole = 'caller' | 'callee';
-type Voice = { oscs: OscillatorNode[]; bus: GainNode; filter: BiquadFilterNode };
+type Voice = { oscs: OscillatorNode[]; gain: GainNode; cleanup: () => void };
 
 let ctx: AudioContext | null = null;
 let ringTimer: number | null = null;
@@ -43,69 +43,109 @@ function armGesture() {
   document.addEventListener('keydown', retry, { once: true });
 }
 
-/** Nota "percutida": fundamental triangular + armónicos, con envolvente de marimba. */
+/** Nota redonda: fundamental triangular + octava suave, filtro y vibrato. */
 function pluck(audio: AudioContext, freq: number, at: number, duration: number, volume: number) {
-  const bus = audio.createGain();
-  bus.gain.setValueAtTime(volume, at);
+  const gain = audio.createGain();
+  gain.gain.setValueAtTime(0.0001, at);
+  gain.gain.exponentialRampToValueAtTime(volume, at + 0.03);
+  gain.gain.exponentialRampToValueAtTime(Math.max(volume * 0.55, 0.0002), at + duration * 0.35);
+  gain.gain.exponentialRampToValueAtTime(0.0001, at + duration);
+
   const filter = audio.createBiquadFilter();
   filter.type = 'lowpass';
-  filter.frequency.setValueAtTime(5200, at);
-  filter.frequency.exponentialRampToValueAtTime(1900, at + duration);
-  filter.Q.setValueAtTime(0.6, at);
-  bus.connect(filter).connect(audio.destination);
+  filter.frequency.setValueAtTime(2800, at);
+  filter.frequency.exponentialRampToValueAtTime(1000, at + duration);
+  filter.Q.setValueAtTime(0.5, at);
+  gain.connect(filter).connect(audio.destination);
 
   const partials = [
     { ratio: 1, type: 'triangle' as OscillatorType, level: 0.9, decay: 1 },
-    { ratio: 2.005, type: 'sine' as OscillatorType, level: 0.26, decay: 0.62 },
-    { ratio: 3.99, type: 'sine' as OscillatorType, level: 0.1, decay: 0.38 },
+    { ratio: 2, type: 'sine' as OscillatorType, level: 0.14, decay: 0.55 },
   ];
 
-  const voice: Voice = { oscs: [], bus, filter };
-  let pending = partials.length;
+  const voice: Voice = { oscs: [], gain, cleanup: () => {} };
+  const nodes: AudioNode[] = [gain, filter];
+  let pending = partials.length + 1;
+  const done = () => {
+    pending -= 1;
+    if (pending === 0) {
+      voices.delete(voice);
+      voice.cleanup();
+    }
+  };
+
   for (const partial of partials) {
     const osc = audio.createOscillator();
-    const gain = audio.createGain();
+    const partialGain = audio.createGain();
     osc.type = partial.type;
     osc.frequency.setValueAtTime(freq * partial.ratio, at);
     const end = at + duration * partial.decay;
-    gain.gain.setValueAtTime(0.0001, at);
-    gain.gain.exponentialRampToValueAtTime(partial.level, at + 0.007);
-    gain.gain.exponentialRampToValueAtTime(0.0001, end);
-    osc.connect(gain).connect(bus);
+    partialGain.gain.setValueAtTime(0.0001, at);
+    partialGain.gain.exponentialRampToValueAtTime(partial.level, at + 0.018);
+    partialGain.gain.exponentialRampToValueAtTime(0.0001, end);
+    osc.connect(partialGain).connect(gain);
     osc.start(at);
-    osc.stop(end + 0.04);
+    osc.stop(end + 0.06);
     voice.oscs.push(osc);
-    osc.onended = () => {
-      pending -= 1;
-      if (pending === 0) {
-        voices.delete(voice);
-        try {
-          for (const node of voice.oscs) node.disconnect();
-          gain.disconnect();
-          bus.disconnect();
-          filter.disconnect();
-        } catch { /* ya desconectado */ }
-      }
-    };
+    nodes.push(osc, partialGain);
+    osc.onended = done;
   }
+
+  const lfo = audio.createOscillator();
+  const depth = audio.createGain();
+  lfo.type = 'sine';
+  lfo.frequency.setValueAtTime(4.5, at);
+  depth.gain.setValueAtTime(freq * 0.0035, at);
+  lfo.connect(depth);
+  for (const osc of voice.oscs) depth.connect(osc.frequency);
+  lfo.start(at);
+  lfo.stop(at + duration + 0.06);
+  voice.oscs.push(lfo);
+  nodes.push(lfo, depth);
+  lfo.onended = done;
+
+  voice.cleanup = () => {
+    for (const node of nodes) {
+      try { node.disconnect(); } catch { /* ya desconectado */ }
+    }
+  };
   voices.add(voice);
 }
 
-/** Motivo ascendente de cinco notas, parecido en textura a un tono de móvil. */
+/** Frase melódica original, con notas que se solapan para no sonar a pitidos. */
+type RingNote = { freq: number; offset: number; duration: number; level: number };
+
+const CALLEE_MOTIF: RingNote[] = [
+  { freq: 523.25, offset: 0, duration: 0.95, level: 0.078 },
+  { freq: 659.25, offset: 0.22, duration: 0.95, level: 0.072 },
+  { freq: 783.99, offset: 0.46, duration: 1.05, level: 0.072 },
+  { freq: 659.25, offset: 0.78, duration: 0.85, level: 0.052 },
+  { freq: 880, offset: 1.05, duration: 1.25, level: 0.058 },
+];
+
+const CALLER_MOTIF: RingNote[] = [
+  { freq: 392, offset: 0, duration: 1, level: 0.054 },
+  { freq: 523.25, offset: 0.24, duration: 1, level: 0.05 },
+  { freq: 659.25, offset: 0.5, duration: 1.1, level: 0.05 },
+  { freq: 523.25, offset: 0.84, duration: 0.9, level: 0.036 },
+  { freq: 783.99, offset: 1.12, duration: 1.3, level: 0.044 },
+];
+
+/** Motivo breve para los tonos de conexión y fin de llamada. */
 function arpeggio(audio: AudioContext, notes: number[], at: number, spacing: number, duration: number, volume: number) {
   notes.forEach((freq, index) => {
-    pluck(audio, freq, at + index * spacing, duration + index * 0.04, volume * (1 - index * 0.06));
+    pluck(audio, freq, at + index * spacing, duration + index * 0.05, volume * (1 - index * 0.08));
   });
 }
 
 function ringCycle(audio: AudioContext, role: RingRole) {
   const now = audio.currentTime + 0.03;
   if (role === 'callee') {
-    // Timbre entrante: arpegio brillante en Do mayor.
-    arpeggio(audio, [523.25, 659.25, 783.99, 1046.5], now, 0.12, 0.5, 0.075);
+    pluck(audio, 261.63, now, 1.5, 0.026);
+    for (const note of CALLEE_MOTIF) pluck(audio, note.freq, now + note.offset, note.duration, note.level);
   } else {
-    // Ringback: mismo estilo, más suave y en La mayor para diferenciarlo.
-    arpeggio(audio, [440, 554.37, 659.25, 880], now, 0.15, 0.48, 0.05);
+    pluck(audio, 196, now, 1.6, 0.02);
+    for (const note of CALLER_MOTIF) pluck(audio, note.freq, now + note.offset, note.duration, note.level);
   }
 }
 
@@ -118,7 +158,7 @@ export async function startRingtone(role: RingRole) {
   ringCycle(audio, role);
   ringTimer = window.setInterval(() => {
     if (ringRole === role) ringCycle(audio, role);
-  }, role === 'callee' ? 2400 : 2700);
+  }, role === 'callee' ? 3600 : 3800);
 }
 
 export function stopRingtone() {
@@ -132,10 +172,10 @@ export function stopRingtone() {
     const now = audio.currentTime;
     for (const voice of voices) {
       try {
-        voice.bus.gain.cancelScheduledValues(now);
-        voice.bus.gain.setValueAtTime(Math.max(voice.bus.gain.value, 0.0001), now);
-        voice.bus.gain.exponentialRampToValueAtTime(0.0001, now + 0.05);
-        for (const osc of voice.oscs) osc.stop(now + 0.07);
+        voice.gain.gain.cancelScheduledValues(now);
+        voice.gain.gain.setValueAtTime(Math.max(voice.gain.gain.value, 0.0001), now);
+        voice.gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+        for (const osc of voice.oscs) osc.stop(now + 0.14);
       } catch { /* la nota ya terminó */ }
     }
   }
@@ -146,14 +186,12 @@ export function stopRingtone() {
 export async function playConnectTone() {
   const audio = await resume();
   if (!audio) return;
-  const now = audio.currentTime + 0.03;
-  arpeggio(audio, [659.25, 987.77], now, 0.13, 0.3, 0.06);
+  arpeggio(audio, [523.25, 659.25], audio.currentTime + 0.03, 0.2, 0.55, 0.05);
 }
 
 /** Tono descendente suave al rechazar, finalizar o perder la llamada. */
 export async function playEndTone() {
   const audio = await resume();
   if (!audio) return;
-  const now = audio.currentTime + 0.03;
-  arpeggio(audio, [659.25, 523.25, 392], now, 0.12, 0.26, 0.045);
+  arpeggio(audio, [523.25, 440, 349.23], audio.currentTime + 0.03, 0.18, 0.5, 0.042);
 }
