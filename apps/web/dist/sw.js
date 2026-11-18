@@ -11,7 +11,7 @@
  * Al cambiar VERSION se invalidan las cachés antiguas en la activación.
  */
 
-const VERSION = 'eton-lex-v8';
+const VERSION = 'eton-lex-v9';
 const SHELL_CACHE = `${VERSION}-shell`;
 const RUNTIME_CACHE = `${VERSION}-runtime`;
 const CACHE_PREFIX = 'eton-lex-';
