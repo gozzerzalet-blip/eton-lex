@@ -4,9 +4,9 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { config } from '../../config.js';
 import { db, uuid } from '../../db/index.js';
-import { requireAuth } from '../../lib/auth.js';
+import { requireAuth, signFileAccess, verifyFileAccess } from '../../lib/auth.js';
 import { extractText, safeUnlink, storageFor, uploader } from '../../lib/files.js';
-import { asyncHandler, forbidden, notFound } from '../../lib/http.js';
+import { asyncHandler, forbidden, notFound, unauthorized } from '../../lib/http.js';
 
 export const documentsRouter = Router();
 
@@ -25,26 +25,37 @@ documentsRouter.get('/files/cover/:name', asyncHandler(async (req, res) => {
   res.sendFile(file);
 }));
 
-documentsRouter.get('/files/:id', requireAuth, asyncHandler(async (req, res) => {
+function canAccessFile(doc: any, uid: string): boolean {
+  if (doc.owner_id === uid) return true;
+  if (doc.visibility === 'shared') return true;
+  if (db.prepare('SELECT 1 FROM document_shares WHERE document_id = ? AND user_id = ?').get(doc.id, uid)) return true;
+  return Boolean(db.prepare(`
+    SELECT 1 FROM messages m
+    JOIN conversation_members cm ON cm.conversation_id = m.conversation_id
+    WHERE m.attachment_id = ? AND cm.user_id = ?
+  `).get(doc.id, uid));
+}
+
+/** Emite un token breve para que <audio> pueda reproducir sin cabeceras Bearer. */
+documentsRouter.get('/files/:id/audio-token', requireAuth, asyncHandler(async (req, res) => {
+  const doc = db.prepare('SELECT id FROM documents WHERE id = ?').get(req.params.id);
+  if (!doc) throw notFound('Archivo no encontrado.');
+  if (!canAccessFile(db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id), req.user!.id)) {
+    throw forbidden('No tienes acceso a este archivo.');
+  }
+  res.json({ token: signFileAccess(req.user!.id, req.params.id), url: `/api/files/${req.params.id}` });
+}));
+
+documentsRouter.get('/files/:id', asyncHandler(async (req, res) => {
   const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id) as any;
   if (!doc) throw notFound('Archivo no encontrado.');
-  const uid = req.user!.id;
-
-  let allowed = doc.owner_id === uid;
-  if (!allowed && doc.visibility === 'shared') allowed = true;
-  if (!allowed) {
-    allowed = Boolean(db.prepare('SELECT 1 FROM document_shares WHERE document_id = ? AND user_id = ?').get(doc.id, uid));
-  }
-  if (!allowed) {
-    allowed = Boolean(db.prepare(`
-      SELECT 1 FROM messages m
-      JOIN conversation_members cm ON cm.conversation_id = m.conversation_id
-      WHERE m.attachment_id = ? AND cm.user_id = ?
-    `).get(doc.id, uid));
-  }
-  if (!allowed) throw forbidden('No tienes acceso a este archivo.');
+  const signedUid = typeof req.query.token === 'string' ? verifyFileAccess(req.query.token, req.params.id) : null;
+  const uid = req.user?.id ?? signedUid;
+  if (!uid) throw unauthorized('Se requiere sesión o un enlace firmado.');
+  if (!canAccessFile(doc, uid)) throw forbidden('No tienes acceso a este archivo.');
   if (!fs.existsSync(doc.path)) throw notFound('El archivo ya no está disponible en el servidor.');
 
+  res.setHeader('Cache-Control', 'private, max-age=300');
   res.setHeader('Content-Type', doc.mime);
   res.setHeader('Content-Disposition', `${doc.mime.startsWith('image/') || doc.mime.startsWith('audio/') ? 'inline' : 'attachment'}; filename="${encodeURIComponent(doc.name)}"`);
   res.sendFile(doc.path);
