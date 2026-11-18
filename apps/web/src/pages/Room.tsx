@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, ApiClientError } from '../lib/api';
-import { getSocket } from '../lib/socket';
+import { useSocket } from '../lib/socket';
 import { useAuth } from '../lib/store';
 import { Avatar, Badge, Skeleton } from '../components/ui';
 import RoomCall from '../components/RoomCall';
@@ -69,7 +69,7 @@ export default function Room() {
   const navigate = useNavigate();
   const roomId = id ?? '';
   const { user } = useAuth();
-  const socket = getSocket();
+  const socket = useSocket();
 
   const [payload, setPayload] = useState<RoomPayload | null>(null);
   const [error, setError] = useState<string | null>(null);

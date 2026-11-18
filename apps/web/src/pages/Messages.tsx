@@ -2,15 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Archive, ArrowLeft, BellOff, Camera, CheckCheck, Copy, Download, Eye, FileText, Forward,
-  Image as ImageIcon, Info, Lock, MessageSquare, Mic, MicOff, MoreHorizontal, Paperclip, Pause, Phone,
-  PhoneOff, Pin, Play, Search, Send, Smile, Square, Trash2, Video, VideoOff, Volume2, X, Users, Plus,
+  Archive, ArrowLeft, BellOff, Camera, Check, CheckCheck, Copy, Download, Eye, FileText, Forward,
+  Image as ImageIcon, Info, Lock, MessageSquare, Mic, MicOff, MonitorOff, MonitorUp, MoreHorizontal,
+  Paperclip, Pause, Phone, PhoneOff, Pin, Play, Search, Send, Smile, Square, Trash2, UserPlus, Video,
+  VideoOff, Volume2, X, Users, Plus,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, ApiClientError } from '../lib/api';
-import { getSocket } from '../lib/socket';
+import { useSocket } from '../lib/socket';
+import { playConnectTone, playEndTone, startRingtone, stopRingtone } from '../lib/callTones';
 import { useAuth } from '../lib/store';
 import type { Conversation, Message } from '../lib/types';
+import { EmojiPicker } from '../components/EmojiPicker';
 import { Avatar, Badge, EmptyState, Modal, Skeleton, Tabs } from '../components/ui';
 import { cn, formatBytes, timeAgo } from '../lib/utils';
 
@@ -23,34 +26,32 @@ type StickerPack = { id: string; name: string; description?: string | null; stic
 type Sticker = { id: string; pack_id: string; name: string; mime: string; size: number; keywords?: string; url: string };
 type ListFilter = 'all' | 'unread' | 'pinned' | 'archived';
 
+type SearchUser = {
+  id: string;
+  name: string;
+  username: string;
+  publicId: string;
+  avatarUrl: string | null;
+  relation: 'none' | 'pending' | 'accepted' | 'blocked' | null;
+  direction?: 'incoming' | 'outgoing';
+  university?: string | null;
+};
+type PeopleSearchResponse = { users: SearchUser[] };
+type FriendEntry = {
+  request_id?: string;
+  id: string;
+  name: string;
+  avatar_url?: string | null;
+  university?: string | null;
+  created_at?: string | null;
+};
+type FriendsResponse = { friends: FriendEntry[]; incoming: FriendEntry[]; outgoing: FriendEntry[] };
+
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '🙏'];
-const MORE_EMOJIS = [
-  '😀', '😅', '🥹', '😍', '😎', '🤔', '😴', '😭',
-  '😡', '🤝', '👏', '🔥', '✨', '🎉', '💡', '⚖️',
-  '📚', '✅', '❌', '⏰', '🙌', '🤣', '😇', '🥳',
-];
 
 function formatClock(value: number) {
   const seconds = Math.max(0, Math.floor(Number(value) || 0));
   return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
-}
-
-function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
-  return (
-    <div className="grid max-h-52 w-[15.5rem] grid-cols-8 gap-0.5 overflow-y-auto rounded-xl border border-line/70 bg-white/95 p-1.5 shadow-lift backdrop-blur-xl dark:bg-white/[.1]">
-      {MORE_EMOJIS.map((emoji) => (
-        <button
-          key={emoji}
-          type="button"
-          onClick={() => onPick(emoji)}
-          className="rounded-md px-0.5 py-0.5 text-[15px] transition-transform hover:scale-110 hover:bg-fg/[.07]"
-          aria-label={`Reacción ${emoji}`}
-        >
-          {emoji}
-        </button>
-      ))}
-    </div>
-  );
 }
 
 function AudioNote({ fileId, name }: { fileId: string; name?: string }) {
@@ -160,7 +161,7 @@ type MediaDevicesInfo = {
 type IncomingCall = { callId: string; from: { id: string; name: string }; conversationId: string; kind: CallKind };
 
 function useCallController() {
-  const socket = getSocket();
+  const socket = useSocket();
   const [active, setActive] = useState<ActiveCall | null>(null);
   const [incoming, setIncoming] = useState<IncomingCall | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -177,6 +178,8 @@ function useCallController() {
   const [videoInputId, setVideoInputId] = useState('');
   const [audioOutputId, setAudioOutputId] = useState('');
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
+  const [sharing, setSharing] = useState(false);
+  const [shareError, setShareError] = useState<string | null>(null);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localRef = useRef<MediaStream | null>(null);
@@ -190,12 +193,28 @@ function useCallController() {
   const negotiatingRef = useRef(false);
   const iceStateRef = useRef('new');
   const audioLiveRef = useRef(false);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const screenVideoSenderRef = useRef<RTCRtpSender | null>(null);
+  const screenAudioSendersRef = useRef<Set<RTCRtpSender>>(new Set());
+  const shareNegotiatingRef = useRef(false);
+  const stopShareRef = useRef<() => Promise<void>>(async () => {});
+  const connectTonePlayedRef = useRef(false);
 
   useEffect(() => { activeRef.current = active; }, [active]);
+  useEffect(() => () => stopRingtone(), []);
   useEffect(() => { iceStateRef.current = iceState; setConnected(iceState === 'connected' || iceState === 'completed' ? audioLiveRef.current : false); }, [iceState]);
   useEffect(() => { audioLiveRef.current = remoteAudioLive; setConnected((iceStateRef.current === 'connected' || iceStateRef.current === 'completed') && remoteAudioLive); }, [remoteAudioLive]);
   useEffect(() => {
-    if (connected) setActive((current) => (current && current.status !== 'active' ? { ...current, status: 'active' } : current));
+    if (connected) {
+      setActive((current) => (current && current.status !== 'active' ? { ...current, status: 'active' } : current));
+      if (!connectTonePlayedRef.current) {
+        connectTonePlayedRef.current = true;
+        stopRingtone();
+        void playConnectTone();
+      }
+    } else {
+      connectTonePlayedRef.current = false;
+    }
   }, [connected]);
   useEffect(() => {
     const element = active?.kind === 'video' ? remoteVideoRef.current : remoteAudioRef.current;
@@ -236,11 +255,19 @@ function useCallController() {
   }, []);
 
   const cleanup = useCallback(() => {
+    stopRingtone();
     try { pcRef.current?.getSenders().forEach((s) => s.track?.stop()); } catch { /* noop */ }
     pcRef.current?.close();
     pcRef.current = null;
     localRef.current?.getTracks().forEach((t) => t.stop());
     localRef.current = null;
+    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+    screenStreamRef.current = null;
+    screenVideoSenderRef.current = null;
+    screenAudioSendersRef.current.clear();
+    shareNegotiatingRef.current = false;
+    setSharing(false);
+    setShareError(null);
     setLocalStream(null);
     setRemoteStream(null);
     remoteStreamRef.current = null;
@@ -329,7 +356,9 @@ function useCallController() {
         }
       : false;
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: audioInputId ? { deviceId: { exact: audioInputId }, echoCancellation: true, noiseSuppression: true } : { echoCancellation: true, noiseSuppression: true },
+      audio: audioInputId
+        ? { deviceId: { exact: audioInputId }, echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: { ideal: 1 } }
+        : { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: { ideal: 1 } },
       video: videoConstraints,
     });
     localRef.current = stream;
@@ -357,6 +386,7 @@ function useCallController() {
       const pc = createPeer(peer.id, callId);
       stream.getTracks().forEach((track) => pc.addTrack(track, stream));
       socket.emit('call:invite', { callId, to: peer.id, conversationId, kind });
+      void startRingtone('caller');
     } catch {
       setError('No se pudo acceder al micrófono o a la cámara. Revisa los permisos del navegador.');
       cleanup();
@@ -368,6 +398,7 @@ function useCallController() {
     if (!incoming) return;
     const call = incoming;
     setIncoming(null);
+    stopRingtone();
     setError(null);
     setActive({ callId: call.callId, kind: call.kind, peerId: call.from.id, peerName: call.from.name, role: 'callee', status: 'ringing' });
     startedAtRef.current = Date.now();
@@ -398,6 +429,8 @@ function useCallController() {
     if (!incoming) return;
     socket?.emit('call:decline', { callId: incoming.callId, to: incoming.from.id });
     setIncoming(null);
+    stopRingtone();
+    void playEndTone();
   }, [incoming, socket]);
 
   const end = useCallback(() => {
@@ -411,6 +444,7 @@ function useCallController() {
     }
     cleanup();
     setActive(null);
+    void playEndTone();
   }, [cleanup, socket]);
 
   const toggleMute = useCallback(() => {
@@ -471,6 +505,121 @@ function useCallController() {
     catch { setError('Este dispositivo no permite cambiar de cámara.'); }
   }, [facingMode]);
 
+  /** Renegociación de la compartición: como máximo un offer en vuelo a la vez. */
+  const sendShareOffer = useCallback((current: ActiveCall, pc: RTCPeerConnection) => {
+    if (shareNegotiatingRef.current || negotiatingRef.current || pc.signalingState !== 'stable') return;
+    shareNegotiatingRef.current = true;
+    void (async () => {
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        if (pc.localDescription?.sdp) {
+          signal(current.peerId, current.callId, { type: 'offer', sdp: pc.localDescription.sdp });
+        }
+      } catch {
+        setShareError('No se pudo renegociar la compartición de pantalla.');
+      } finally {
+        shareNegotiatingRef.current = false;
+      }
+    })();
+  }, [signal]);
+
+  const stopShare = useCallback(async () => {
+    const stream = screenStreamRef.current;
+    screenStreamRef.current = null;
+    setSharing(false);
+    setShareError(null);
+    stream?.getTracks().forEach((track) => track.stop());
+
+    const pc = pcRef.current;
+    const current = activeRef.current;
+    if (!pc || !current) return;
+
+    const cameraTrack = localRef.current?.getVideoTracks()[0] ?? null;
+    const videoSender = screenVideoSenderRef.current
+      ?? pc.getSenders().find((sender) => sender.track?.kind === 'video');
+    if (videoSender) await videoSender.replaceTrack(cameraTrack).catch(() => {});
+    for (const sender of screenAudioSendersRef.current) {
+      if (pc.getSenders().includes(sender)) await sender.replaceTrack(null).catch(() => {});
+    }
+    screenAudioSendersRef.current.clear();
+    screenVideoSenderRef.current = null;
+    // En llamadas de voz el transceiver de vídeo es nuevo: hay que quitarlo con otra negociación.
+    if (current.kind === 'audio') sendShareOffer(current, pc);
+  }, [sendShareOffer]);
+  stopShareRef.current = stopShare;
+
+  const startShare = useCallback(async () => {
+    if (sharing) {
+      await stopShare();
+      return;
+    }
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      const message = 'Este dispositivo o navegador no permite compartir pantalla en llamadas';
+      setShareError(message);
+      toast.info(message);
+      return;
+    }
+    const current = activeRef.current;
+    const pc = pcRef.current;
+    if (!current || !pc) return;
+
+    setShareError(null);
+    let stream: MediaStream;
+    try {
+      // Debe ejecutarse dentro del gesto del usuario: el selector del navegador.
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    } catch (error) {
+      const name = error instanceof DOMException ? error.name : '';
+      const message = name === 'AbortError'
+        ? 'Compartición de pantalla cancelada.'
+        : name === 'NotAllowedError'
+          ? 'Permiso denegado para compartir la pantalla. Revisa los permisos del navegador.'
+          : 'No se pudo iniciar la compartición de pantalla.';
+      setShareError(message);
+      toast.error(name === 'AbortError' ? message : 'No se pudo compartir la pantalla. Revisa los permisos del navegador.');
+      return;
+    }
+
+    const videoTrack = stream.getVideoTracks()[0];
+    if (!videoTrack) {
+      stream.getTracks().forEach((track) => track.stop());
+      setShareError('El navegador no entregó video de la pantalla.');
+      return;
+    }
+    const audioTrack = stream.getAudioTracks()[0] ?? null;
+    screenStreamRef.current = stream;
+    videoTrack.addEventListener('ended', () => { void stopShareRef.current(); }, { once: true });
+    audioTrack?.addEventListener('ended', () => setShareError('Se detuvo el audio compartido; el video sigue activo.'), { once: true });
+
+    const videoSender = pc.getSenders().find((sender) => sender.track?.kind === 'video');
+    let videoAttached = false;
+    try {
+      if (videoSender) {
+        await videoSender.replaceTrack(videoTrack);
+      } else {
+        // Llamada de voz: no hay sender de vídeo, se añade y se renegocia.
+        screenVideoSenderRef.current = pc.addTrack(videoTrack, stream);
+      }
+      videoAttached = true;
+    } catch { /* se reporta el fallo y no se simula la compartición */ }
+    if (!videoAttached) {
+      screenStreamRef.current = null;
+      stream.getTracks().forEach((track) => track.stop());
+      setShareError('No se pudo adjuntar la pantalla a la llamada.');
+      return;
+    }
+    if (audioTrack) {
+      try { screenAudioSendersRef.current.add(pc.addTrack(audioTrack, stream)); }
+      catch { setShareError('El video se comparte; el audio de pantalla no está disponible en este navegador.'); }
+    }
+    setSharing(true);
+    if (!audioTrack) {
+      setShareError('Audio de pantalla no disponible: depende del navegador y de la opción elegida en el selector.');
+    }
+    if (!videoSender || audioTrack) sendShareOffer(current, pc);
+  }, [sendShareOffer, sharing, stopShare]);
+
   useEffect(() => {
     if (!socket) return;
 
@@ -480,6 +629,7 @@ function useCallController() {
         return;
       }
       setIncoming(payload);
+      void startRingtone('callee');
     };
 
     const sendOffer = async (current: ActiveCall, iceRestart = false) => {
@@ -544,17 +694,48 @@ function useCallController() {
     };
 
     const onDeclined = (payload: { callId: string }) => {
+      stopRingtone();
       if (activeRef.current?.callId !== payload.callId) return;
       toast.info('La llamada fue rechazada.');
       cleanup();
       setActive(null);
+      void playEndTone();
     };
 
     const onEnded = (payload: { callId: string }) => {
+      stopRingtone();
       setIncoming((current) => (current?.callId === payload.callId ? null : current));
       if (activeRef.current?.callId !== payload.callId) return;
       cleanup();
       setActive(null);
+      void playEndTone();
+    };
+
+    const onBusy = (payload?: { callId?: string }) => {
+      stopRingtone();
+      if (payload?.callId && activeRef.current?.callId !== payload.callId) return;
+      toast.error('La persona está en otra llamada');
+      cleanup();
+      setActive(null);
+      void playEndTone();
+    };
+
+    const onMissed = (payload?: { callId?: string }) => {
+      stopRingtone();
+      if (payload?.callId && activeRef.current?.callId !== payload.callId) return;
+      toast.info('Llamada perdida.');
+      cleanup();
+      setActive(null);
+      void playEndTone();
+    };
+
+    const onFailed = (payload?: { callId?: string; reason?: string }) => {
+      stopRingtone();
+      if (payload?.callId && activeRef.current?.callId !== payload.callId) return;
+      toast.error(payload?.reason === 'expired' ? 'La llamada ya no está disponible.' : 'No se pudo establecer la llamada.');
+      cleanup();
+      setActive(null);
+      void playEndTone();
     };
 
     socket.on('call:incoming', onIncoming);
@@ -562,6 +743,9 @@ function useCallController() {
     socket.on('call:signal', onSignal);
     socket.on('call:declined', onDeclined);
     socket.on('call:ended', onEnded);
+    socket.on('call:busy', onBusy);
+    socket.on('call:missed', onMissed);
+    socket.on('call:failed', onFailed);
 
     return () => {
       socket.off('call:incoming', onIncoming);
@@ -569,6 +753,9 @@ function useCallController() {
       socket.off('call:signal', onSignal);
       socket.off('call:declined', onDeclined);
       socket.off('call:ended', onEnded);
+      socket.off('call:busy', onBusy);
+      socket.off('call:missed', onMissed);
+      socket.off('call:failed', onFailed);
     };
   }, [cleanup, signal, socket]);
 
@@ -577,6 +764,7 @@ function useCallController() {
     devices, audioInputId, videoInputId, audioOutputId, facingMode,
     muted, cameraOn, error, start, accept, decline, end, toggleMute, toggleCamera,
     switchAudioInput, switchVideoInput, switchFacingMode, setAudioOutputId,
+    sharing, shareError, startShare, stopShare,
     remoteAudioRef, remoteVideoRef, setError,
   };
 }
@@ -595,6 +783,8 @@ function CallLayer({ call }: { call: CallController }) {
   useEffect(() => {
     const attach = (element: HTMLMediaElement | null) => {
       if (!element) return;
+      element.volume = 1;
+      element.muted = false;
       if (element.srcObject !== call.remoteStream) {
         element.srcObject = call.remoteStream ?? null;
         if (call.remoteStream) void element.play().catch(() => {});
@@ -628,7 +818,10 @@ function CallLayer({ call }: { call: CallController }) {
               {call.incoming.kind === 'video' ? <Video size={22} /> : <Phone size={22} />}
             </button>
           </div>
-          <p className="mt-5 text-[10px] text-fg/25">Llamada P2P cifrada por WebRTC · requiere permisos del navegador</p>
+          <p className="mx-auto mt-5 max-w-[17rem] text-[10px] leading-relaxed text-fg/25">
+            Llamada P2P cifrada por WebRTC · al aceptar se solicitan permisos de micrófono
+            {call.incoming.kind === 'video' ? ' y cámara' : ''}. El audio viaja directamente entre ustedes.
+          </p>
         </div>
       </div>
     );
@@ -650,6 +843,11 @@ function CallLayer({ call }: { call: CallController }) {
             </p>
             {call.active.status === 'active' && !call.connected && (
               <p className="mt-0.5 text-[10px] text-amber-300/70">Audio no disponible · verificando permisos y red</p>
+            )}
+            {call.sharing && (
+              <p className="mt-0.5 flex items-center gap-1.5 text-[10px] font-medium text-emerald-300/80">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" /> Compartiendo pantalla
+              </p>
             )}
           </div>
         </div>
@@ -690,9 +888,20 @@ function CallLayer({ call }: { call: CallController }) {
         )}
       </div>
 
+      <p className="relative mx-auto mt-1 max-w-md px-4 text-center text-[10px] leading-relaxed text-white/30">
+        Se solicitan permisos de micrófono{video ? ' y cámara' : ''}. Llamada P2P: el audio
+        {video ? ' y el video' : ''} viajan directamente entre ustedes, sin pasar por nuestros servidores.
+      </p>
+
       {call.error && (
         <p className="relative mx-auto mb-3 max-w-md rounded-xl border border-white/20 bg-white/[.06] px-4 py-2 text-center text-[11.5px] text-white/70">
           {call.error}
+        </p>
+      )}
+
+      {call.shareError && (
+        <p className="relative mx-auto mb-3 max-w-md rounded-xl border border-white/20 bg-white/[.06] px-4 py-2 text-center text-[11.5px] text-white/70">
+          {call.shareError} {!call.sharing && 'La llamada continúa con normalidad.'}
         </p>
       )}
 
@@ -748,6 +957,21 @@ function CallLayer({ call }: { call: CallController }) {
             {call.cameraOn ? <Camera size={19} /> : <VideoOff size={19} />}
           </button>
         )}
+        <button
+          type="button"
+          onClick={() => void call.startShare()}
+          className={cn(
+            'flex h-12 items-center gap-1.5 rounded-full border px-3 text-[11px] font-medium transition-colors',
+            call.sharing
+              ? 'border-transparent bg-white text-[#0a0a0b]'
+              : 'border-white/15 bg-white/[.06] text-white/80 hover:bg-white/[.12]',
+          )}
+          aria-label={call.sharing ? 'Detener compartición' : 'Compartir pantalla'}
+          title={call.sharing ? 'Detener compartición' : 'Compartir pantalla'}
+        >
+          {call.sharing ? <MonitorOff size={18} /> : <MonitorUp size={18} />}
+          {call.sharing ? 'Detener compartición' : 'Compartir pantalla'}
+        </button>
         <button onClick={call.end} className="flex h-14 w-14 items-center justify-center rounded-full bg-white text-[#0a0a0b] shadow-[0_16px_34px_-18px_rgba(255,255,255,.5)] transition-transform hover:scale-105" aria-label="Finalizar llamada">
           <PhoneOff size={22} />
         </button>
@@ -763,7 +987,7 @@ export default function Messages() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { user } = useAuth();
-  const socket = getSocket();
+  const socket = useSocket();
   const call = useCallController();
 
   const [search, setSearch] = useState('');
@@ -793,6 +1017,10 @@ export default function Messages() {
   const [headerSearchOpen, setHeaderSearchOpen] = useState(false);
   const [headerSearch, setHeaderSearch] = useState('');
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const [peopleOpen, setPeopleOpen] = useState(false);
+  const [peopleTab, setPeopleTab] = useState<'search' | 'requests'>('search');
+  const [peopleSearch, setPeopleSearch] = useState('');
+  const [debouncedPeopleSearch, setDebouncedPeopleSearch] = useState('');
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -830,6 +1058,18 @@ export default function Messages() {
     queryKey: ['message-students', studentSearch],
     queryFn: () => api<StudentsResponse>(`/users?q=${encodeURIComponent(studentSearch)}&limit=20`),
     enabled: newChatOpen,
+  });
+
+  const peopleQuery = useQuery({
+    queryKey: ['people-search', debouncedPeopleSearch],
+    queryFn: () => api<PeopleSearchResponse>(`/users/search?q=${encodeURIComponent(debouncedPeopleSearch)}&limit=20`),
+    enabled: peopleOpen && peopleTab === 'search' && debouncedPeopleSearch.length >= 2,
+  });
+
+  const friendsQuery = useQuery({
+    queryKey: ['community-friends'],
+    queryFn: () => api<FriendsResponse>('/community/friends'),
+    enabled: peopleOpen,
   });
 
   const packsQuery = useQuery({
@@ -910,6 +1150,12 @@ export default function Messages() {
     }
   }, [id, queryClient]);
 
+  // Solo busca cuando el texto deja de cambiar y tiene al menos 2 caracteres.
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedPeopleSearch(peopleSearch.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [peopleSearch]);
+
   useEffect(() => {
     setDraft('');
     setReplyTo(null);
@@ -937,6 +1183,7 @@ export default function Messages() {
       setStickerOpen(false);
       setHeaderSearchOpen(false);
       setForwardFor(null);
+      setPeopleOpen(false);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -1051,9 +1298,16 @@ export default function Messages() {
   };
 
   const insertEmoji = (emoji: string) => {
-    handleDraft(`${draft}${emoji}`);
+    const element = textareaRef.current;
+    const start = element?.selectionStart ?? draft.length;
+    const end = element?.selectionEnd ?? draft.length;
+    handleDraft(`${draft.slice(0, start)}${emoji}${draft.slice(end)}`);
     setComposerEmojiOpen(false);
-    textareaRef.current?.focus();
+    window.requestAnimationFrame(() => {
+      element?.focus();
+      const caret = start + emoji.length;
+      element?.setSelectionRange(caret, caret);
+    });
   };
 
   const startLongPress = (messageId: string) => {
@@ -1383,7 +1637,7 @@ export default function Messages() {
     }
   };
 
-  const startChat = async (studentId: string) => {
+  const startChat = async (studentId: string, fromPeople = false) => {
     try {
       const response = await api<ConversationResponse>('/messaging/conversations', {
         method: 'POST',
@@ -1391,12 +1645,56 @@ export default function Messages() {
       });
       setNewChatOpen(false);
       setStudentSearch('');
+      if (fromPeople) {
+        setPeopleOpen(false);
+        setPeopleSearch('');
+        setDebouncedPeopleSearch('');
+      }
       await queryClient.invalidateQueries({ queryKey: ['conversations'] });
       navigate(`/mensajes/${response.conversation.id}`);
     } catch (error) {
       toast.error(error instanceof ApiClientError ? error.message : 'No se pudo iniciar la conversación.');
     }
   };
+
+  const refreshPeople = useCallback(async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['people-search'] }),
+      queryClient.invalidateQueries({ queryKey: ['community-friends'] }),
+      queryClient.invalidateQueries({ queryKey: ['friends'] }),
+    ]);
+  }, [queryClient]);
+
+  const runFriendAction = async (action: () => Promise<unknown>, message: string) => {
+    try {
+      await action();
+      await refreshPeople();
+      toast.success(message);
+    } catch (error) {
+      toast.error(error instanceof ApiClientError ? error.message : 'No se pudo completar la acción.');
+    }
+  };
+
+  const addFriend = (userId: string) => runFriendAction(
+    () => api('/community/friends/request', { method: 'POST', body: JSON.stringify({ userId }) }),
+    'Solicitud de amistad enviada.',
+  );
+
+  const respondFriend = (requestId: string, action: 'accept' | 'reject' | 'block') => runFriendAction(
+    () => api(`/community/friends/${requestId}/respond`, { method: 'POST', body: JSON.stringify({ action }) }),
+    action === 'accept' ? 'Solicitud aceptada.' : action === 'reject' ? 'Solicitud rechazada.' : 'Usuario bloqueado.',
+  );
+
+  const cancelFriend = (userId: string) => runFriendAction(
+    () => api(`/community/friends/${userId}`, { method: 'DELETE' }),
+    'Solicitud cancelada.',
+  );
+
+  const directChatId = (userId: string) => (conversationsQuery.data?.conversations ?? []).find(
+    (item) => item.type === 'direct' && item.members.some((member) => member.id === userId),
+  )?.id;
+
+  const hasChatWith = (userId: string) => Boolean(directChatId(userId));
 
   const isReadByPeer = (message: Message) => {
     if (!conversation || conversation.type !== 'direct' || message.sender.id !== user?.id) return false;
@@ -1414,6 +1712,7 @@ export default function Messages() {
             <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar conversación…" className="input !py-2 !text-[12px] pl-9" />
           </div>
           <button onClick={() => setNewChatOpen(true)} className="btn btn-primary btn-sm !px-2.5" aria-label="Nueva conversación"><Plus size={15} /></button>
+          <button onClick={() => setPeopleOpen(true)} className="btn btn-sm !px-2.5" aria-label="Buscar personas" title="Buscar personas"><UserPlus size={15} /></button>
         </div>
       </div>
 
@@ -1795,7 +2094,7 @@ export default function Messages() {
                           <button key={emoji} onClick={() => react(message, emoji)} className="rounded-full px-1 text-[14px] hover:scale-110" aria-label={`Reaccionar con ${emoji}`}>{emoji}</button>
                         ))}
                       </div>
-                      <EmojiPicker onPick={(emoji) => react(message, emoji)} />
+                      <EmojiPicker onPick={(emoji) => void react(message, emoji)} onClose={() => setReactionFor(null)} />
                     </div>
                   )}
                 </div>
@@ -1830,7 +2129,7 @@ export default function Messages() {
 
         {composerEmojiOpen && (
           <div className="absolute bottom-full left-3 z-30 mb-2" onClick={(event) => event.stopPropagation()}>
-            <EmojiPicker onPick={insertEmoji} />
+            <EmojiPicker onPick={insertEmoji} onClose={() => setComposerEmojiOpen(false)} />
           </div>
         )}
 
@@ -1998,10 +2297,13 @@ export default function Messages() {
           <p className="text-[10.5px] font-semibold uppercase tracking-[0.18em] text-fg/30">Mensajería privada</p>
           <h1 className="mt-1 font-display text-[30px] leading-none text-fg/95">Conversaciones</h1>
         </div>
-        <div className="flex items-center gap-2 text-[10px] text-fg/25">
-          <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-fg/60" /> Tiempo real</span>
-          <span className="hidden sm:inline">·</span>
-          <span className="hidden sm:inline">Llamadas WebRTC P2P</span>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-2 text-[10px] text-fg/25">
+            <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-fg/60" /> Tiempo real</span>
+            <span className="hidden sm:inline">·</span>
+            <span className="hidden sm:inline">Llamadas WebRTC P2P</span>
+          </div>
+          <button onClick={() => setPeopleOpen(true)} className="btn btn-sm"><UserPlus size={13} /> Buscar personas</button>
         </div>
       </div>
 
@@ -2077,6 +2379,176 @@ export default function Messages() {
             ))}
           {(conversationsQuery.data?.conversations ?? []).filter((item) => item.id !== id).length === 0 && (
             <p className="py-4 text-center text-[11px] text-fg/40">No hay otras conversaciones.</p>
+          )}
+        </div>
+      </Modal>
+
+      <Modal open={peopleOpen} onClose={() => setPeopleOpen(false)} title="Buscar personas" width="max-w-xl">
+        <div className="space-y-3">
+          <Tabs<'search' | 'requests'>
+            value={peopleTab}
+            onChange={setPeopleTab}
+            className="w-full [&>button]:flex-1 [&>button]:text-[11px]"
+            items={[
+              { id: 'search', label: 'Buscar' },
+              { id: 'requests', label: 'Solicitudes', count: friendsQuery.data?.incoming.length || undefined },
+            ]}
+          />
+
+          {peopleTab === 'search' ? (
+            <>
+              <div className="relative">
+                <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg/25" />
+                <input
+                  autoFocus
+                  value={peopleSearch}
+                  onChange={(event) => setPeopleSearch(event.target.value)}
+                  placeholder="Busca por nombre o @username…"
+                  className="input !py-2 !text-[12px] pl-9"
+                />
+              </div>
+
+              {peopleSearch.trim().length < 2 ? (
+                <p className="py-8 text-center text-[11px] text-fg/35">Escribe al menos 2 caracteres para buscar personas.</p>
+              ) : (
+                <div className="max-h-[22rem] space-y-1.5 overflow-y-auto">
+                  {peopleQuery.isLoading && [0, 1, 2].map((i) => <Skeleton key={i} className="h-14 w-full" />)}
+
+                  {peopleQuery.isError && (
+                    <div className="rounded-xl border border-line px-3 py-6 text-center">
+                      <p className="text-[11px] text-fg/50">No se pudo realizar la búsqueda.</p>
+                      <button onClick={() => void peopleQuery.refetch()} className="btn btn-sm mt-2">Reintentar</button>
+                    </div>
+                  )}
+
+                  {!peopleQuery.isLoading && !peopleQuery.isError && (peopleQuery.data?.users ?? [])
+                    .filter((person) => person.id !== user?.id)
+                    .map((person) => {
+                      const incomingEntry = friendsQuery.data?.incoming.find((entry) => entry.id === person.id);
+                      const incomingRequestId = incomingEntry?.request_id;
+                      const university = person.university
+                        ?? incomingEntry?.university
+                        ?? friendsQuery.data?.outgoing.find((entry) => entry.id === person.id)?.university
+                        ?? friendsQuery.data?.friends.find((entry) => entry.id === person.id)?.university;
+                      return (
+                        <div key={person.id} className="flex flex-wrap items-center gap-2.5 rounded-xl border border-line px-2.5 py-2">
+                          <Avatar name={person.name} url={person.avatarUrl} size={34} />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-[12.5px] text-fg/85">{person.name}</p>
+                            <p className="truncate text-[10px] text-fg/35">
+                              @{person.username || person.publicId}
+                              {university ? ` · ${university}` : ''}
+                            </p>
+                          </div>
+                          <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                            {(person.relation === 'none' || person.relation === null) && (
+                              <button onClick={() => void addFriend(person.id)} className="btn btn-sm !px-2 !py-1 !text-[10px]"><UserPlus size={11} /> Agregar amigo</button>
+                            )}
+                            {person.relation === 'pending' && person.direction === 'outgoing' && (
+                              <>
+                                <button disabled className="btn btn-ghost btn-sm !px-2 !py-1 !text-[10px] opacity-60"><Check size={11} /> Solicitud enviada</button>
+                                <button onClick={() => void cancelFriend(person.id)} className="btn btn-ghost btn-sm !px-2 !py-1 !text-[10px] text-fg/50" title="Cancelar solicitud">Cancelar</button>
+                              </>
+                            )}
+                            {person.relation === 'pending' && person.direction === 'incoming' && (
+                              incomingRequestId ? (
+                                <>
+                                  <button onClick={() => void respondFriend(incomingRequestId, 'accept')} className="btn btn-sm !px-2 !py-1 !text-[10px]"><Check size={11} /> Aceptar solicitud</button>
+                                  <button onClick={() => void respondFriend(incomingRequestId, 'reject')} className="btn btn-ghost btn-sm !px-2 !py-1 !text-[10px]">Rechazar</button>
+                                </>
+                              ) : (
+                                <button onClick={() => setPeopleTab('requests')} className="btn btn-sm !px-2 !py-1 !text-[10px]">Ver solicitud</button>
+                              )
+                            )}
+                            {person.relation === 'accepted' && (
+                              <>
+                                <span className="flex items-center gap-1 rounded-full border border-line px-2 py-1 text-[10px] text-fg/50"><Check size={11} /> Amigos</span>
+                                {!hasChatWith(person.id) && (
+                                  <button onClick={() => void startChat(person.id, true)} className="btn btn-sm !px-2 !py-1 !text-[10px]"><Send size={11} /> Iniciar chat</button>
+                                )}
+                              </>
+                            )}
+                            {person.relation === 'blocked' && (
+                              <span className="rounded-full border border-line px-2 py-1 text-[10px] text-fg/40">Bloqueado</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                  {!peopleQuery.isLoading && !peopleQuery.isError && (peopleQuery.data?.users ?? []).filter((person) => person.id !== user?.id).length === 0 && (
+                    <EmptyState icon={<Users size={18} />} title="No se encontraron usuarios" description="Prueba con otro nombre o @username." />
+                  )}
+                </div>
+              )}
+              <p className="text-[10px] leading-relaxed text-fg/25">Solo se muestran datos públicos. Nunca compartimos correos ni mensajes.</p>
+            </>
+          ) : (
+            <div className="space-y-3">
+              {friendsQuery.isLoading && [0, 1, 2].map((i) => <Skeleton key={i} className="h-14 w-full" />)}
+              {friendsQuery.isError && (
+                <div className="rounded-xl border border-line px-3 py-6 text-center">
+                  <p className="text-[11px] text-fg/50">No se pudieron cargar tus solicitudes.</p>
+                  <button onClick={() => void friendsQuery.refetch()} className="btn btn-sm mt-2">Reintentar</button>
+                </div>
+              )}
+
+              {!friendsQuery.isLoading && !friendsQuery.isError && (
+                <div className="max-h-[24rem] space-y-4 overflow-y-auto">
+                  <div className="space-y-1.5">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-fg/35">Recibidas ({friendsQuery.data?.incoming.length ?? 0})</p>
+                    {friendsQuery.data?.incoming.map((request) => (
+                      <div key={request.request_id ?? request.id} className="flex flex-wrap items-center gap-2.5 rounded-xl border border-line px-2.5 py-2">
+                        <Avatar name={request.name} url={request.avatar_url} size={32} />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[12px] text-fg/85">{request.name}</p>
+                          <p className="truncate text-[10px] text-fg/35">{request.university ?? 'Estudiante de Derecho'}</p>
+                        </div>
+                        <div className="flex shrink-0 gap-1">
+                          <button onClick={() => void respondFriend(request.request_id ?? request.id, 'accept')} className="btn btn-sm !px-2 !py-1 !text-[10px]"><Check size={11} /> Aceptar</button>
+                          <button onClick={() => void respondFriend(request.request_id ?? request.id, 'reject')} className="btn btn-ghost btn-sm !px-2 !py-1 !text-[10px]">Rechazar</button>
+                        </div>
+                      </div>
+                    ))}
+                    {!friendsQuery.data?.incoming.length && <p className="py-2 text-center text-[11px] text-fg/35">No tienes solicitudes recibidas.</p>}
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-fg/35">Enviadas ({friendsQuery.data?.outgoing.length ?? 0})</p>
+                    {friendsQuery.data?.outgoing.map((request) => (
+                      <div key={request.request_id ?? request.id} className="flex flex-wrap items-center gap-2.5 rounded-xl border border-line px-2.5 py-2">
+                        <Avatar name={request.name} url={request.avatar_url} size={32} />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[12px] text-fg/85">{request.name}</p>
+                          <p className="truncate text-[10px] text-fg/35">Enviada {timeAgo(request.created_at)}</p>
+                        </div>
+                        <button onClick={() => void cancelFriend(request.id)} className="btn btn-ghost btn-sm !px-2 !py-1 !text-[10px] text-fg/50">Cancelar</button>
+                      </div>
+                    ))}
+                    {!friendsQuery.data?.outgoing.length && <p className="py-2 text-center text-[11px] text-fg/35">No tienes solicitudes enviadas.</p>}
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-fg/35">Amistades ({friendsQuery.data?.friends.length ?? 0})</p>
+                    {friendsQuery.data?.friends.map((friend) => (
+                      <div key={friend.id} className="flex flex-wrap items-center gap-2.5 rounded-xl border border-line px-2.5 py-2">
+                        <Avatar name={friend.name} url={friend.avatar_url} size={32} />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[12px] text-fg/85">{friend.name}</p>
+                          <p className="truncate text-[10px] text-fg/35">{friend.university ?? 'Amigo'}</p>
+                        </div>
+                        {directChatId(friend.id) ? (
+                          <Link to={`/mensajes/${directChatId(friend.id)}`} onClick={() => setPeopleOpen(false)} className="btn btn-ghost btn-sm !px-2 !py-1 !text-[10px]">Abrir chat</Link>
+                        ) : (
+                          <button onClick={() => void startChat(friend.id, true)} className="btn btn-sm !px-2 !py-1 !text-[10px]"><Send size={11} /> Iniciar chat</button>
+                        )}
+                      </div>
+                    ))}
+                    {!friendsQuery.data?.friends.length && <p className="py-2 text-center text-[11px] text-fg/35">Aún no tienes amistades en la comunidad.</p>}
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </div>
       </Modal>
