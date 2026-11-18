@@ -79,7 +79,11 @@ communityRouter.post('/friends/:id/respond', asyncHandler(async (req, res) => {
         db.prepare("UPDATE friendships SET status = 'accepted', responded_at = datetime('now') WHERE id = ?").run(row.id);
     }
     else if (action === 'reject') {
-        db.prepare('DELETE FROM friendships WHERE id = ?').run(row.id);
+        // Solo quien recibió la solicitud puede rechazarla. Conservamos el estado
+        // 'rejected' para que la otra persona pueda volver a solicitar amistad.
+        if (row.addressee_id !== req.user.id)
+            throw forbidden();
+        db.prepare("UPDATE friendships SET status = 'rejected', responded_at = datetime('now') WHERE id = ?").run(row.id);
     }
     else {
         db.prepare("UPDATE friendships SET status = 'blocked', responded_at = datetime('now') WHERE id = ?").run(row.id);
