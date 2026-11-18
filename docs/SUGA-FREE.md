@@ -10,6 +10,10 @@ desde este repositorio.
 >
 > ETON LEX es una página web pública de acceso libre con registro de cuentas. No es una app de
 > escritorio ni una app instalable; no presentes `localhost`, IP ni túneles como enlace oficial.
+>
+> El plan Free **no incluye dominios propios** (0 dominios). La URL de Suga es permanente para
+> este servicio; si quieres `etonlex.com`, necesitas Suga Pro u otro hosting y acceso DNS.
+> Detalles en [`PERMANENT-URL.md`](PERMANENT-URL.md).
 
 ## Qué se preparó en el repo
 
@@ -28,7 +32,7 @@ desde este repositorio.
 Desde la raíz de `eton-lex`, con Node en el PATH:
 
 ```powershell
-$env:PATH='C:\Users\Zalet\AppData\Local\eton-node\node-v26.13.1-win-x64;'+$env:PATH
+# Requiere Node 22 o superior en el PATH.
 npm.cmd run build
 npm.cmd test
 npm.cmd run typecheck

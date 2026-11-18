@@ -74,6 +74,9 @@ const DEFAULT_NEWS_FEEDS = [
     'https://eur-lex.europa.eu/ES/display-feed.rss?rssId=162|internacional|Legislación UE|EUR-Lex Legislación',
 ];
 const dataDir = process.env.DATA_DIR ?? path.join(apiRoot, 'data');
+// Enlaces públicos usados antes de un dominio propio. Se redirigen a
+// PUBLIC_WEB_URL conservando ruta y parámetros, sin generar versiones nuevas.
+const DEFAULT_LEGACY_PUBLIC_URLS = 'https://a7yp4cd07ujg-production-zay69hs2.us-central1.suga.run';
 export const config = {
     env: process.env.NODE_ENV ?? 'development',
     isProd: process.env.NODE_ENV === 'production',
@@ -82,6 +85,10 @@ export const config = {
     // En producción debe ser el dominio con HTTPS (p. ej. https://etonlex.pe).
     publicWebUrl: (process.env.PUBLIC_WEB_URL ?? `http://localhost:${int(process.env.PORT, 4000)}`).replace(/\/+$/, ''),
     webOrigin: (process.env.WEB_ORIGIN ?? 'http://localhost:5173').split(',').map((s) => s.trim()),
+    legacyPublicUrls: (process.env.LEGACY_PUBLIC_URLS ?? DEFAULT_LEGACY_PUBLIC_URLS)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
     jwtSecret: process.env.JWT_SECRET ?? 'dev-only-insecure-secret-change-me',
     accessTtl: process.env.ACCESS_TOKEN_TTL ?? '15m',
     refreshTtlDays: int(process.env.REFRESH_TOKEN_TTL_DAYS, 30),

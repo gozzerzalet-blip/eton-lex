@@ -31,6 +31,29 @@ export function createApp() {
   const app = express();
 
   app.set('trust proxy', 1);
+
+  // Un solo enlace público: los dominios de despliegues anteriores redirigen
+  // al canonical con la misma ruta y los mismos parámetros. No crea versiones
+  // nuevas ni depende de que la persona tenga el enlace más reciente.
+  const canonicalHost = (() => {
+    try { return new URL(config.publicWebUrl).host.toLowerCase(); } catch { return ''; }
+  })();
+  const legacyHosts = new Set(
+    config.legacyPublicUrls
+      .map((url) => { try { return new URL(url).host.toLowerCase(); } catch { return ''; } })
+      .filter(Boolean),
+  );
+  app.use((req, res, next) => {
+    if (!config.isProd || !canonicalHost || legacyHosts.size === 0) return next();
+    const forwarded = req.headers['x-forwarded-host'];
+    const rawHost = Array.isArray(forwarded)
+      ? (forwarded[0] ?? req.headers.host ?? '')
+      : (forwarded ?? req.headers.host ?? '');
+    const host = rawHost.split(',')[0].trim().toLowerCase();
+    if (!host || host === canonicalHost || !legacyHosts.has(host)) return next();
+    res.redirect(308, new URL(req.originalUrl, config.publicWebUrl).toString());
+  });
+
   app.use(helmet({
     contentSecurityPolicy: config.isProd ? {
       directives: {

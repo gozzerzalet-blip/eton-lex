@@ -4,10 +4,14 @@ Este documento separa tres cosas que suelen mezclarse: **desplegar la web**, **e
 para móvil** y **publicar en tiendas**. La primera depende solo del repositorio; las otras
 dos dependen de cuentas, firmas y plataformas externas.
 
-> Estado actual: la web está lista para desplegarse. La app móvil y las tiendas **no están
-> iniciadas**. No es posible publicar en Play Store ni App Store desde este equipo Windows
-> sin cuentas de desarrollador, claves de firma y, en el caso de iOS, macOS/Xcode o un
-> servicio de build en la nube.
+> Estado actual: la web está publicada de forma permanente en Suga. La app móvil y las
+> tiendas **no están iniciadas**. No es posible publicar en Play Store ni App Store desde
+> este equipo Windows sin cuentas de desarrollador, claves de firma y, en el caso de iOS,
+> macOS/Xcode o un servicio de build en la nube.
+>
+> La URL pública oficial y el flujo de actualizaciones están documentados en
+> [`PERMANENT-URL.md`](PERMANENT-URL.md). El túnel de la sección 1.1b es solo una
+> demostración local; ya no debe compartirse como enlace de ETON LEX.
 
 ---
 
@@ -24,7 +28,7 @@ NODE_ENV=production npm start
 La API sirve `apps/web/dist` si existe. Un solo proceso atiende API, Socket.IO y SPA en
 `PORT` (4000 por defecto).
 
-### 1.1b Acceso público inmediato, sin costo (Cloudflare Quick Tunnel)
+### 1.1b Acceso público inmediato, sin costo (Cloudflare Quick Tunnel — solo histórico)
 
 > ⚠️ **Solo para demostraciones.** No es el enlace de lanzamiento: depende de esta PC, el
 > hostname cambia en cada arranque y no sirve para SEO, dominio propio ni tiendas. El lanzamiento

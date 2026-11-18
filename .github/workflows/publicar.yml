@@ -1,0 +1,60 @@
+name: Verificar y publicar
+
+# Flujo de una sola URL:
+# develop → verificaciones → main → despliegue automático de Suga.
+on:
+  push:
+    branches: [develop]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: eton-lex-publicar
+  cancel-in-progress: false
+
+jobs:
+  verificar-y-publicar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Obtener develop
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Verificar que develop incluye lo que ya está publicado
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor origin/main HEAD
+
+      - name: Tipos
+        run: npm run typecheck
+
+      - name: Pruebas de la API
+        run: npm --workspace apps/api run test
+
+      - name: Compilar artefactos
+        run: npm run build
+
+      - name: Los artefactos compilados deben estar versionados
+        run: git diff --exit-code -- apps/api/dist apps/web/dist
+
+      - name: Promover a main
+        run: |
+          git config user.name "ETON LEX CI"
+          git config user.email "ci@etonlex.local"
+          git fetch origin main
+          git checkout main
+          git merge --ff-only origin/develop
+          git push origin main

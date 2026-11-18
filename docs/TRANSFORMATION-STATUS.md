@@ -3,7 +3,7 @@
 Este documento es la fuente de verdad del avance por fases. Se actualiza al
 terminar **cada fase**, con pruebas reales ejecutadas, no con intenciones.
 
-Última actualización: **2026-11-18 — Fase 5 completada y ETON AI corregida**.
+Última actualización: **2026-11-18 — Fase 5, ETON AI corregida y publicación centralizada**.
 
 ## Decisiones vigentes
 
@@ -337,6 +337,45 @@ biblioteca con el artículo transcrito.
   `index-D3SJ0-xx.js` y `/api/system/capabilities` informa
   `ai.configured=true`, `provider=pollinations`, `model=openai-fast`.
 - Commit publicado: `a0ade7b` en `main`.
+
+## Enlace permanente y CI/CD
+
+### Auditoría
+
+- La publicación real es un único servicio de Suga en
+  `https://a7yp4cd07ujg-production-zay69hs2.us-central1.suga.run`, desplegado
+  desde `main` con el Dockerfile de la raíz.
+- La URL contiene el ID del servicio, el entorno y el clúster; no se regenera
+  por commit. Los últimos cuatro pushes actualizaron el mismo hostname.
+- `etonlex.com` y `www.etonlex.com` no resuelven DNS. El plan Suga Free permite
+  **0 dominios propios**; hacer el proxy por Cloudflare tampoco funciona: con
+  `Host: etonlex.com` el edge responde `421 Misdirected Request`.
+- El túnel Cloudflare de `docs/PUBLISHING.md` era temporal y ya no resuelve.
+
+### Cambios aplicados
+
+- `.github/workflows/publicar.yml`: `develop` ejecuta typecheck, pruebas y build;
+  solo si todo pasa hace `merge --ff-only` en `main`. Suga publica `main` en la
+  misma URL.
+- `apps/api/src/config.ts`: `LEGACY_PUBLIC_URLS` conserva los hosts anteriores;
+  por defecto incluye la URL actual de Suga, que solo redirige cuando el
+  canonical cambia.
+- `apps/api/src/app.ts`: redirección `308` de hosts antiguos al canonical,
+  preservando ruta y parámetros mediante `X-Forwarded-Host`/`Host`.
+- `apps/api/src/modules/system/system.routes.ts`: `/api/system/capabilities`
+  expone `deployment.canonicalUrl` y `deployment.legacyRedirects`.
+- `apps/web/public/sw.js`: versión `v10` para invalidar cachés anteriores.
+- `docs/PERMANENT-URL.md`: fuente de verdad del enlace, el flujo, la caché, los
+  datos y lo que falta para `etonlex.com`.
+- Prueba nueva `legacy-link.test.ts`: `antiguo.suga.run/registro?...` responde
+  `308` a `https://etonlex.com/registro?...` y el host canonical responde `200`.
+
+### Resultado
+
+- Enlace permanente disponible hoy: URL de Suga indicada arriba.
+- `etonlex.com` **no está configurado**; requiere dominio propio, acceso DNS y
+  Suga Pro u otro hosting, además de actualizar `PUBLIC_WEB_URL`, `WEB_ORIGIN` y
+  `LEGACY_PUBLIC_URLS`.
 
 ## Reglas que se mantienen en todas las fases
 

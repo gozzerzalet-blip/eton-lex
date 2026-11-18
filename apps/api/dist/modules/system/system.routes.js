@@ -23,6 +23,10 @@ systemRouter.get('/health', (_req, res) => {
 });
 systemRouter.get('/capabilities', (_req, res) => {
     res.json({
+        deployment: {
+            canonicalUrl: config.publicWebUrl,
+            legacyRedirects: config.legacyPublicUrls.length,
+        },
         ai: { ...providerInfo(), note: providerInfo().configured ? null : 'Configura AI_PROVIDER / AI_API_KEY / AI_MODEL para activar ETON AI.' },
         news: {
             configured: config.news.feeds.length > 0 || Boolean(config.news.newsApiKey),
