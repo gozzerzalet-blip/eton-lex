@@ -231,10 +231,15 @@ export function createApp() {
             index: false,
             maxAge: '1h',
             setHeaders: (res, filePath) => {
-                // El service worker y el manifest deben revalidarse siempre:
-                // un sw.js cacheado impide recibir actualizaciones.
+                // El service worker y el manifest deben revalidarse siempre.
+                // Cloudflare puede transformar `no-cache` en max-age; CDN-Cache-Control
+                // y no-store evitan que el edge sirva una versión anterior del SW.
                 if (/[\\/](sw\.js|manifest\.webmanifest)$/.test(filePath)) {
-                    res.setHeader('Cache-Control', 'no-cache');
+                    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+                    res.setHeader('CDN-Cache-Control', 'no-store');
+                    res.setHeader('Cloudflare-CDN-Cache-Control', 'no-store');
+                    res.setHeader('Pragma', 'no-cache');
+                    res.setHeader('Expires', '0');
                 }
             },
         }));
