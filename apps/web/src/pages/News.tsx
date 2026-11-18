@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Globe2, MapPin, Newspaper, RefreshCw, Search } from 'lucide-react';
 import { api } from '../lib/api';
+import { useSocket } from '../lib/socket';
 import type { NewsItem } from '../lib/types';
 import { Badge, EmptyState, SectionHeader, Skeleton } from '../components/ui';
 import { cn, timeAgo } from '../lib/utils';
@@ -19,6 +20,17 @@ export default function NewsPage() {
   const [scope, setScope] = useState<'all' | 'nacional' | 'internacional'>('all');
   const [q, setQ] = useState('');
   const [page, setPage] = useState(1);
+  const queryClient = useQueryClient();
+  const socket = useSocket();
+
+  // En cuanto el servidor detecta titulares nuevos, se recargan sin esperar
+  // al siguiente intervalo ni a que la persona pulse "Actualizar".
+  useEffect(() => {
+    if (!socket) return;
+    const onNew = () => { void queryClient.invalidateQueries({ queryKey: ['news'] }); };
+    socket.on('news:new', onNew);
+    return () => { socket.off('news:new', onNew); };
+  }, [queryClient, socket]);
 
   const params = new URLSearchParams();
   if (scope !== 'all') params.set('scope', scope);

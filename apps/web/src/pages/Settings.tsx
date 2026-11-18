@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle, Bell, Check, Database, KeyRound, Laptop, LogOut, Mail, MessageCircle, Moon, Palette,
-  ShieldCheck, Sparkles, Sun, Users, Video, Newspaper,
+  ShieldCheck, Smartphone, Sparkles, Sun, Users, Video, Newspaper,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, ApiClientError } from '../lib/api';
@@ -13,6 +13,11 @@ import { Badge, SectionHeader, Skeleton } from '../components/ui';
 import { BubbleColorPicker } from '../components/BubbleColorPicker';
 import { useBubbleColors } from '../lib/bubbleColors';
 import { cn, formatDate } from '../lib/utils';
+
+type InstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
+};
 
 type Area = { slug: string; name: string; description: string; norms: number };
 type Session = { id: string; user_agent?: string | null; ip?: string | null; created_at: string; expires_at: string };
@@ -52,6 +57,28 @@ export default function SettingsPage() {
   const [savingAreas, setSavingAreas] = useState(false);
   const [savingPrivacy, setSavingPrivacy] = useState(false);
   const [changingPassword, setChangingPassword] = useState(false);
+  const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
+  const [installed, setInstalled] = useState(false);
+  const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent);
+
+  useEffect(() => {
+    const onPrompt = (event: Event) => { event.preventDefault(); setInstallPrompt(event as InstallPromptEvent); };
+    const onInstalled = () => { setInstalled(true); setInstallPrompt(null); };
+    window.addEventListener('beforeinstallprompt', onPrompt);
+    window.addEventListener('appinstalled', onInstalled);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', onPrompt);
+      window.removeEventListener('appinstalled', onInstalled);
+    };
+  }, []);
+
+  const installApp = async () => {
+    if (!installPrompt) return;
+    await installPrompt.prompt();
+    const choice = await installPrompt.userChoice;
+    if (choice.outcome === 'accepted') setInstalled(true);
+    setInstallPrompt(null);
+  };
 
   const areasQuery = useQuery({ queryKey: ['areas'], queryFn: () => api<{ areas: Area[] }>('/library/areas') });
   const sessionsQuery = useQuery({ queryKey: ['sessions'], queryFn: () => api<{ sessions: Session[] }>('/auth/sessions') });
@@ -222,6 +249,22 @@ export default function SettingsPage() {
             <p className="mt-2 text-[10px] leading-relaxed text-fg/30">
               El tema se aplica de inmediato y se guarda en tu cuenta. Ambos modos comparten la misma paleta de marca.
             </p>
+          </section>
+
+          <section className="card p-5">
+            <h2 className="flex items-center gap-2 font-display text-lg text-fg/90"><Smartphone size={16} className="text-fg/40" /> Instalar en tu celular</h2>
+            <p className="mt-1 text-[11.5px] leading-relaxed text-fg/35">
+              Gratis y sin Play Store ni App Store: ETON LEX funciona como aplicación instalable desde el navegador en Android, iPhone y computadoras.
+            </p>
+            {installed ? (
+              <p className="mt-3 text-[11.5px] font-medium text-ok">Listo: ETON LEX ya está en tu pantalla de inicio.</p>
+            ) : isIos ? (
+              <p className="mt-3 text-[11.5px] text-fg/60">En Safari, toca <strong>Compartir</strong> y luego <strong>Agregar a pantalla de inicio</strong>.</p>
+            ) : installPrompt ? (
+              <button onClick={() => void installApp()} className="btn btn-sm mt-3"><Smartphone size={13} /> Instalar ETON LEX</button>
+            ) : (
+              <p className="mt-3 text-[11.5px] text-fg/60">En Chrome, abre el menú <strong>⋮</strong> y elige <strong>Instalar aplicación</strong> o <strong>Agregar a pantalla de inicio</strong>.</p>
+            )}
           </section>
 
           <section className="card p-5">
