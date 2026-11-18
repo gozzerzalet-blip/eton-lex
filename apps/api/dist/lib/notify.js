@@ -21,6 +21,10 @@ export function joinUserToConversation(userId, conversationId) {
 export function emitToRoom(roomId, event, payload) {
     io?.to(`room:${roomId}`).emit(event, payload);
 }
+/** Aviso global (por ejemplo, noticias nuevas) a todas las sesiones abiertas. */
+export function broadcast(event, payload) {
+    io?.emit(event, payload);
+}
 export function notify(userId, type, title, body, link, priority = 'normal') {
     const id = uuid();
     db.prepare(`
