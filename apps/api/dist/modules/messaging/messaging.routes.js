@@ -3,9 +3,9 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { db, tx, uuid } from '../../db/index.js';
 import { safeUnlink } from '../../lib/files.js';
-import { requireAuth } from '../../lib/auth.js';
+import { acceptedContactIds, requireAuth } from '../../lib/auth.js';
 import { asyncHandler, badRequest, forbidden, notFound } from '../../lib/http.js';
-import { emitToConversation, emitToUser, notify } from '../../lib/notify.js';
+import { emitToConversation, emitToUser, joinUserToConversation, notify } from '../../lib/notify.js';
 export const messagingRouter = Router();
 messagingRouter.use(requireAuth);
 function memberIds(conversationId) {
@@ -103,6 +103,10 @@ messagingRouter.post('/conversations', asyncHandler(async (req, res) => {
     const unique = [...new Set(data.memberIds.filter((id) => id !== req.user.id))];
     if (unique.length === 0)
         throw badRequest('Selecciona al menos un estudiante.');
+    const contacts = new Set(acceptedContactIds(req.user.id));
+    if (unique.some((id) => !contacts.has(id))) {
+        throw forbidden('Solo puedes iniciar conversaciones con contactos aceptados.');
+    }
     if (data.type === 'direct') {
         if (unique.length !== 1)
             throw badRequest('Una conversación directa requiere exactamente una persona.');
@@ -128,7 +132,9 @@ messagingRouter.post('/conversations', asyncHandler(async (req, res) => {
             db.prepare('INSERT INTO conversation_members (conversation_id, user_id) VALUES (?, ?)').run(id, uid);
         }
     });
+    joinUserToConversation(req.user.id, id);
     for (const uid of unique) {
+        joinUserToConversation(uid, id);
         emitToUser(uid, 'conversation:new', { conversationId: id });
         notify(uid, 'message', 'Nueva conversación', `${req.user.name} inició una conversación contigo.`, '/mensajes');
     }
