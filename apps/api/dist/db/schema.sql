@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS users (
   public_id       TEXT UNIQUE,
   links           TEXT NOT NULL DEFAULT '[]',
   privacy_fields  TEXT NOT NULL DEFAULT '{}',
+  bubble_colors   TEXT NOT NULL DEFAULT '{}',
   role            TEXT NOT NULL DEFAULT 'student' CHECK (role IN ('student','moderator','admin')),
   email_verified  INTEGER NOT NULL DEFAULT 0,
   privacy         TEXT NOT NULL DEFAULT '{"profile":"community","activity":"friends"}',
