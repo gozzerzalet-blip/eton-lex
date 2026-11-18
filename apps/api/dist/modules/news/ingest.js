@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import Parser from 'rss-parser';
 import { config } from '../../config.js';
 import { db, uuid } from '../../db/index.js';
-import { notify } from '../../lib/notify.js';
+import { broadcast, notify } from '../../lib/notify.js';
 const parser = new Parser({ timeout: 15_000 });
 const hash = (value) => crypto.createHash('sha256').update(value).digest('hex').slice(0, 32);
 /** Formato: url | scope | categoría | nombre (los tres últimos opcionales). */
@@ -108,6 +108,7 @@ export async function ingestNews() {
         ? result.errors.map((error) => `${error.feed}: ${error.error}`).join('; ').slice(0, 2000)
         : null);
     if (result.inserted > 0) {
+        broadcast('news:new', { inserted: result.inserted, at: new Date().toISOString() });
         const followers = db.prepare(`
       SELECT DISTINCT f.user_id FROM follows f WHERE f.target_type = 'area'
     `).all();
