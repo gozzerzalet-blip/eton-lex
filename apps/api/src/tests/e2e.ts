@@ -139,6 +139,15 @@ async function main() {
   assert.equal(me.data.user.theme, userA.theme);
   ok('sesión JWT y perfil privado');
 
+  const colorPatch = await request('/api/auth/me', {
+    method: 'PATCH',
+    token: tokenA,
+    body: { bubbleColors: { mine: '#0B84FF', other: '#E9E9EC' } },
+  });
+  assert.equal(colorPatch.status, 200, JSON.stringify(colorPatch.data));
+  assert.deepEqual(colorPatch.data.user.bubbleColors, { mine: '#0B84FF', other: '#E9E9EC' });
+  ok('colores de burbujas se guardan en la cuenta');
+
   const login = await request('/api/auth/login', {
     method: 'POST',
     body: { email: `e2e.andrea.${stamp}@etonlex.test`, password: PASSWORD },
