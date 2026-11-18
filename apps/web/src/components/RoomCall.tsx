@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import {
-  Camera, CameraOff, Mic, MicOff, MonitorOff, MonitorUp, Sparkles, Video,
+  Camera, CameraOff, Mic, MicOff, MonitorOff, MonitorUp, Sparkles, Video, Volume2, VolumeX,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { getSocket } from '../lib/socket';
@@ -13,9 +13,10 @@ type RoomSignal =
   | { kind: 'description'; description: RTCSessionDescriptionInit }
   | { kind: 'candidate'; candidate: RTCIceCandidateInit }
   | { kind: 'hello'; name: string }
-  | { kind: 'bye' };
+  | { kind: 'bye' }
+  | { kind: 'restart-request' };
 
-type RemoteTile = { id: string; name: string; stream: MediaStream };
+type RemoteTile = { id: string; name: string; stream: MediaStream; speaking?: boolean };
 
 type CameraFilter = 'none' | 'grayscale' | 'sepia' | 'blur';
 
@@ -29,20 +30,33 @@ const FILTERS: Record<CameraFilter, string> = {
 /** Orden determinista: solo un extremo de cada par inicia la oferta. */
 const initiates = (a: string, b: string) => a < b;
 
-function VideoTile({ tile, muted = false, filter, className, label, mirror = false }: {
+function VideoTile({ tile, muted = false, filter, className, label, mirror = false, sinkId, forcePlay = 0 }: {
   tile: RemoteTile;
   muted?: boolean;
   filter?: string;
   className?: string;
   label?: string;
   mirror?: boolean;
+  sinkId?: string;
+  forcePlay?: number;
 }) {
   const ref = useRef<HTMLVideoElement>(null);
   useEffect(() => {
-    if (ref.current && ref.current.srcObject !== tile.stream) ref.current.srcObject = tile.stream;
-  }, [tile.stream]);
+    const element = ref.current;
+    if (!element) return;
+    if (element.srcObject !== tile.stream) {
+      element.srcObject = tile.stream;
+      if (tile.stream) void element.play().catch(() => {});
+    } else if (tile.stream && element.paused) {
+      void element.play().catch(() => {});
+    }
+  }, [tile.stream, forcePlay]);
+  useEffect(() => {
+    const element = ref.current as (HTMLVideoElement & { setSinkId?: (id: string) => Promise<void> }) | null;
+    if (element && sinkId && typeof element.setSinkId === 'function') void element.setSinkId(sinkId).catch(() => {});
+  }, [sinkId, tile.stream]);
   return (
-    <div className={cn('group relative overflow-hidden rounded-2xl bg-black', className)}>
+    <div className={cn('group relative overflow-hidden rounded-2xl bg-black', tile.speaking && 'ring-2 ring-emerald-400/80', className)}>
       <video
         ref={ref}
         autoPlay
@@ -56,6 +70,60 @@ function VideoTile({ tile, muted = false, filter, className, label, mirror = fal
       </div>
     </div>
   );
+}
+
+/** Detecta voz real con Web Audio; no conecta el analizador a la salida. */
+function useVoiceActivity(sources: Array<{ id: string; stream: MediaStream }>, resumeKey = 0): Set<string> {
+  const [speaking, setSpeaking] = useState<Set<string>>(new Set());
+  const ctxRef = useRef<AudioContext | null>(null);
+
+  useEffect(() => {
+    void ctxRef.current?.resume().catch(() => {});
+  }, [resumeKey]);
+
+  useEffect(() => {
+    const AudioCtx = window.AudioContext ?? (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    let ctx: AudioContext;
+    try { ctx = new AudioCtx(); } catch { return; }
+    ctxRef.current = ctx;
+    void ctx.resume().catch(() => {});
+    const nodes = new Map<string, { source: MediaStreamAudioSourceNode; analyser: AnalyserNode; data: Uint8Array<ArrayBuffer> }>();
+
+    for (const { id, stream } of sources) {
+      if (!stream.getAudioTracks().length || nodes.has(id)) continue;
+      try {
+        const source = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 512;
+        source.connect(analyser);
+        nodes.set(id, { source, analyser, data: new Uint8Array(new ArrayBuffer(analyser.fftSize)) });
+      } catch { /* flujo sin audio utilizable */ }
+    }
+
+    const timer = window.setInterval(() => {
+      const active = new Set<string>();
+      for (const [id, node] of nodes) {
+        node.analyser.getByteTimeDomainData(node.data);
+        let sum = 0;
+        for (const sample of node.data) sum += ((sample - 128) / 128) ** 2;
+        const rms = Math.sqrt(sum / node.data.length);
+        if (rms > 0.035) active.add(id);
+      }
+      setSpeaking((current) => {
+        if (current.size === active.size && [...active].every((id) => current.has(id))) return current;
+        return active;
+      });
+    }, 140);
+
+    return () => {
+      window.clearInterval(timer);
+      for (const node of nodes.values()) { node.source.disconnect(); node.analyser.disconnect(); }
+      void ctx.close().catch(() => {});
+    };
+  }, [sources]);
+
+  return speaking;
 }
 
 export default function RoomCall({ roomId, members, userId, userName }: {
@@ -80,9 +148,12 @@ export default function RoomCall({ roomId, members, userId, userName }: {
   const localStreamRef = useRef<MediaStream | null>(null);
   const cameraTrackRef = useRef<MediaStreamTrack | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
+  const screenAudioTrackRef = useRef<MediaStreamTrack | null>(null);
+  const screenAudioSendersRef = useRef<Set<RTCRtpSender>>(new Set());
   const shareIdRef = useRef<string | null>(null);
   const iceServersRef = useRef<RTCIceServer[]>([{ urls: 'stun:stun.l.google.com:19302' }]);
   const disposedRef = useRef(false);
+  const restartingRef = useRef<Set<string>>(new Set());
   const stopShareRef = useRef<() => Promise<void>>(async () => {});
 
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -92,7 +163,15 @@ export default function RoomCall({ roomId, members, userId, userName }: {
   const [cameraOn, setCameraOn] = useState(true);
   const [filter, setFilter] = useState<CameraFilter>('none');
   const [sharing, setSharing] = useState(false);
+  const [shareAudio, setShareAudio] = useState(false);
+  const [shareAudioAvailable, setShareAudioAvailable] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
+  const [audioInputId, setAudioInputId] = useState('');
+  const [videoInputId, setVideoInputId] = useState('');
+  const [audioOutputId, setAudioOutputId] = useState('');
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
+  const [deviceList, setDeviceList] = useState<MediaDeviceInfo[]>([]);
+  const [playEpoch, setPlayEpoch] = useState(0);
 
   const publishRemotes = useCallback(() => {
     setRemotes(
@@ -102,6 +181,13 @@ export default function RoomCall({ roomId, members, userId, userName }: {
         name: namesRef.current.get(id) ?? 'Participante',
       })),
     );
+  }, []);
+
+  const loadDevices = useCallback(async () => {
+    try {
+      const all = await navigator.mediaDevices?.enumerateDevices?.() ?? [];
+      if (!disposedRef.current) setDeviceList(all.filter((device) => device.deviceId));
+    } catch { /* permisos aún no concedidos */ }
   }, []);
 
   const emitSignal = useCallback((to: string, signal: RoomSignal) => {
@@ -115,13 +201,14 @@ export default function RoomCall({ roomId, members, userId, userName }: {
     queueRef.current.set(remoteId, next);
   }, []);
 
-  const sendOffer = useCallback((remoteId: string, pc: RTCPeerConnection) => {
-    if (disposedRef.current || suppressNegotiationRef.current.has(remoteId)) return;
+  const sendOffer = useCallback((remoteId: string, pc: RTCPeerConnection, iceRestart = false) => {
+    if (disposedRef.current || (!iceRestart && suppressNegotiationRef.current.has(remoteId))) return;
     runNegotiation(remoteId, async () => {
       if (pc.signalingState !== 'stable' || pcsRef.current.get(remoteId) !== pc) return;
       makingOfferRef.current.add(remoteId);
       try {
-        const offer = await pc.createOffer();
+        if (iceRestart) pc.restartIce();
+        const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined);
         if (pc.signalingState !== 'stable') return;
         await pc.setLocalDescription(offer);
         if (pc.localDescription?.sdp) {
@@ -167,11 +254,16 @@ export default function RoomCall({ roomId, members, userId, userName }: {
       streamsRef.current.set(remoteId, target);
       publishRemotes();
     };
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed' && !disposedRef.current) pc.restartIce();
+    pc.oniceconnectionstatechange = () => {
+      if (disposedRef.current || restartingRef.current.has(remoteId)) return;
+      if (pc.iceConnectionState !== 'failed' && pc.iceConnectionState !== 'disconnected') return;
+      restartingRef.current.add(remoteId);
+      if (initiates(userId, remoteId)) sendOffer(remoteId, pc, true);
+      else emitSignal(remoteId, { kind: 'restart-request' });
+      window.setTimeout(() => restartingRef.current.delete(remoteId), 6_000);
     };
     return pc;
-  }, [emitSignal, publishRemotes, sendOffer]);
+  }, [emitSignal, publishRemotes, sendOffer, userId]);
 
   const closePeer = useCallback((remoteId: string) => {
     const pc = pcsRef.current.get(remoteId);
@@ -243,19 +335,26 @@ export default function RoomCall({ roomId, members, userId, userName }: {
 
   const stopShare = useCallback(async () => {
     const stream = screenStreamRef.current;
+    const audioTrack = screenAudioTrackRef.current;
     screenStreamRef.current = null;
+    screenAudioTrackRef.current = null;
     setScreenStream(null);
     setSharing(false);
+    setShareAudio(false);
+    setShareAudioAvailable(false);
     stream?.getTracks().forEach((track) => track.stop());
+    audioTrack?.stop();
 
     for (const [remoteId, pc] of pcsRef.current) {
-      const sender = pc.getSenders().find((s) => s.track?.kind === 'video')
+      const videoSender = pc.getSenders().find((s) => s.track?.kind === 'video')
         ?? pc.getTransceivers().find((t) => t.receiver.track.kind === 'video')?.sender;
-      if (sender) {
-        await sender.replaceTrack(cameraTrackRef.current ?? null).catch(() => {});
-        renegotiateScreen(remoteId, pc);
+      if (videoSender) await videoSender.replaceTrack(cameraTrackRef.current ?? null).catch(() => {});
+      for (const sender of screenAudioSendersRef.current) {
+        if (pc.getSenders().includes(sender)) await sender.replaceTrack(null).catch(() => {});
       }
+      renegotiateScreen(remoteId, pc);
     }
+    screenAudioSendersRef.current.clear();
     const shareId = shareIdRef.current;
     shareIdRef.current = null;
     if (shareId) {
@@ -274,13 +373,22 @@ export default function RoomCall({ roomId, members, userId, userName }: {
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-      const track = stream.getVideoTracks()[0];
-      if (!track) return;
+      // audio:true es indispensable: el navegador solo ofrece audio si el usuario
+      // marca "compartir audio del sistema" en el selector.
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      const videoTrack = stream.getVideoTracks()[0];
+      if (!videoTrack) return;
+      const audioTrack = stream.getAudioTracks()[0] ?? null;
       screenStreamRef.current = stream;
+      screenAudioTrackRef.current = audioTrack;
       setScreenStream(stream);
-      setMediaError(null);
-      track.addEventListener('ended', () => { void stopShareRef.current(); }, { once: true });
+      setShareAudio(Boolean(audioTrack));
+      setShareAudioAvailable(Boolean(audioTrack));
+      setMediaError(audioTrack
+        ? null
+        : 'Esta combinación no entregó audio. Activa "compartir audio del sistema" en el selector o comparte una ventana compatible.');
+      videoTrack.addEventListener('ended', () => { void stopShareRef.current(); }, { once: true });
+      audioTrack?.addEventListener('ended', () => setShareAudioAvailable(false), { once: true });
 
       const response = await api<{ id: string }>(`/rooms/${roomId}/screens`, {
         method: 'POST',
@@ -290,19 +398,72 @@ export default function RoomCall({ roomId, members, userId, userName }: {
       setSharing(true);
 
       for (const [remoteId, pc] of pcsRef.current) {
-        const sender = pc.getSenders().find((s) => s.track?.kind === 'video')
+        const videoSender = pc.getSenders().find((s) => s.track?.kind === 'video')
           ?? pc.getTransceivers().find((t) => t.receiver.track.kind === 'video')?.sender;
-        if (sender) {
-          await sender.replaceTrack(track).catch(() => {});
-          renegotiateScreen(remoteId, pc);
+        if (videoSender) await videoSender.replaceTrack(videoTrack).catch(() => {});
+        if (audioTrack) {
+          // Un transceiver nuevo conserva el micrófono y añade el audio de la pantalla.
+          const sender = pc.addTrack(audioTrack, stream);
+          screenAudioSendersRef.current.add(sender);
         }
+        renegotiateScreen(remoteId, pc);
       }
     } catch (error) {
-      // El usuario canceló el selector: no es un error.
       if (error instanceof DOMException && error.name === 'NotAllowedError' && !screenStreamRef.current) return;
       setMediaError('No se pudo compartir la pantalla.');
     }
   }, [renegotiateScreen, roomId, sharing, stopShare, userName]);
+
+  const toggleShareAudio = useCallback(() => {
+    const next = !shareAudio;
+    for (const sender of screenAudioSendersRef.current) {
+      const track = sender.track;
+      if (track) track.enabled = next;
+    }
+    if (screenAudioTrackRef.current) screenAudioTrackRef.current.enabled = next;
+    setShareAudio(next);
+  }, [shareAudio]);
+
+  const switchMic = useCallback(async (deviceId: string) => {
+    setAudioInputId(deviceId);
+    const current = localStreamRef.current?.getAudioTracks()[0];
+    try {
+      const fresh = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: deviceId } } });
+      const track = fresh.getAudioTracks()[0];
+      if (!track) return;
+      for (const pc of pcsRef.current.values()) {
+        const sender = pc.getSenders().find((s) => s.track?.kind === 'audio' && s.track !== screenAudioTrackRef.current);
+        await sender?.replaceTrack(track).catch(() => {});
+      }
+      if (current) { current.stop(); localStreamRef.current?.removeTrack(current); }
+      if (localStreamRef.current) localStreamRef.current.addTrack(track);
+    } catch { setMediaError('No se pudo cambiar el micrófono.'); }
+  }, []);
+
+  const switchCamera = useCallback(async (deviceId: string) => {
+    setVideoInputId(deviceId);
+    const current = cameraTrackRef.current;
+    try {
+      const fresh = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } } });
+      const track = fresh.getVideoTracks()[0];
+      if (!track) return;
+      for (const pc of pcsRef.current.values()) {
+        const sender = pc.getSenders().find((s) => s.track?.kind === 'video');
+        await sender?.replaceTrack(sharing ? null : track).catch(() => {});
+      }
+      if (current) { current.stop(); localStreamRef.current?.removeTrack(current); }
+      cameraTrackRef.current = track;
+      if (localStreamRef.current && !sharing) localStreamRef.current.addTrack(track);
+      setLocalStream(new MediaStream(localStreamRef.current?.getTracks() ?? []));
+    } catch { setMediaError('No se pudo cambiar la cámara.'); }
+  }, [sharing]);
+
+  const switchFacing = useCallback(async () => {
+    const next = facingMode === 'user' ? 'environment' : 'user';
+    setFacingMode(next);
+    try { await cameraTrackRef.current?.applyConstraints({ facingMode: { ideal: next } }); }
+    catch { setMediaError('Este dispositivo no permite cambiar de cámara.'); }
+  }, [facingMode]);
 
   // Media local, descubrimiento de pares y señalización.
   useEffect(() => {
@@ -318,13 +479,14 @@ export default function RoomCall({ roomId, members, userId, userName }: {
     const init = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-          video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: { echoCancellation: true, noiseSuppression: true },
+          video: { facingMode: { ideal: 'user' }, width: { ideal: 1280 }, height: { ideal: 720 } },
         });
         if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
         localStreamRef.current = stream;
         cameraTrackRef.current = stream.getVideoTracks()[0] ?? null;
         setLocalStream(stream);
+        void loadDevices();
       } catch {
         try {
           const audioOnly = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -333,6 +495,7 @@ export default function RoomCall({ roomId, members, userId, userName }: {
           setLocalStream(audioOnly);
           setCameraOn(false);
           setMediaError('Cámara no disponible: te conectamos solo con audio.');
+          void loadDevices();
         } catch {
           if (cancelled) return;
           setMediaError('Sin permisos de micrófono o cámara. Puedes ver y escuchar a los demás.');
@@ -358,6 +521,8 @@ export default function RoomCall({ roomId, members, userId, userName }: {
       for (const id of [...pcsRef.current.keys()]) closePeer(id);
       localStreamRef.current?.getTracks().forEach((track) => track.stop());
       screenStreamRef.current?.getTracks().forEach((track) => track.stop());
+      screenAudioTrackRef.current?.stop();
+      screenAudioSendersRef.current.clear();
       const shareId = shareIdRef.current;
       shareIdRef.current = null;
       if (shareId) void api(`/rooms/${roomId}/screens/${shareId}/stop`, { method: 'POST' }).catch(() => {});
@@ -368,7 +533,7 @@ export default function RoomCall({ roomId, members, userId, userName }: {
       setScreenStream(null);
       setRemotes([]);
     };
-  }, [closePeer, createPeer, publishRemotes, roomId, userId, userName]);
+  }, [closePeer, createPeer, loadDevices, publishRemotes, roomId, userId, userName]);
 
   useEffect(() => {
     for (const member of members) namesRef.current.set(member.id, member.name);
@@ -383,6 +548,15 @@ export default function RoomCall({ roomId, members, userId, userName }: {
       if (payload.roomId !== roomId || payload.from === userId || !payload.signal) return;
       const { from, signal } = payload;
 
+      if (signal.kind === 'restart-request') {
+        const pc = pcsRef.current.get(from);
+        if (pc && initiates(userId, from) && !restartingRef.current.has(from)) {
+          restartingRef.current.add(from);
+          sendOffer(from, pc, true);
+          window.setTimeout(() => restartingRef.current.delete(from), 6_000);
+        }
+        return;
+      }
       if (signal.kind === 'hello') {
         namesRef.current.set(from, signal.name || 'Participante');
         if (initiates(userId, from)) {
@@ -415,7 +589,7 @@ export default function RoomCall({ roomId, members, userId, userName }: {
 
     activeSocket.on('room:signal', onSignal);
     return () => { activeSocket.off('room:signal', onSignal); };
-  }, [closePeer, createPeer, handleDescription, publishRemotes, roomId, socket, userId]);
+  }, [closePeer, createPeer, handleDescription, publishRemotes, roomId, sendOffer, socket, userId]);
 
   const toggleMute = () => {
     const next = !muted;
@@ -429,9 +603,19 @@ export default function RoomCall({ roomId, members, userId, userName }: {
     setCameraOn(next);
   };
 
+  const voiceSources = useMemo(
+    () => [
+      ...remotes.map((tile) => ({ id: tile.id, stream: tile.stream })),
+      ...(localStream ? [{ id: userId, stream: localStream }] : []),
+    ],
+    [localStream, remotes, userId],
+  );
+  const speaking = useVoiceActivity(voiceSources, playEpoch);
+
   const localTile: RemoteTile = {
     id: userId,
     name: 'Tú',
+    speaking: speaking.has(userId),
     stream: screenStream ?? localStream ?? new MediaStream(),
   };
 
@@ -442,18 +626,26 @@ export default function RoomCall({ roomId, members, userId, userName }: {
         {remotes.length > 0 ? (
           <>
             <div className={cn('grid min-h-0 flex-1 gap-2', remotes.length > 4 ? 'grid-cols-2 sm:grid-cols-3' : remotes.length > 1 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1')}>
-              {remotes.map((tile) => <VideoTile key={tile.id} tile={tile} className="h-full min-h-[140px] w-full" />)}
+              {remotes.map((tile) => (
+                <VideoTile
+                  key={tile.id}
+                  tile={{ ...tile, speaking: speaking.has(tile.id) }}
+                  sinkId={audioOutputId}
+                  forcePlay={playEpoch}
+                  className="h-full min-h-[140px] w-full"
+                />
+              ))}
             </div>
             {(localStream || screenStream) && (
               <div className="absolute bottom-[86px] right-5 z-10 h-24 w-36 overflow-hidden rounded-xl border border-white/20 bg-black shadow-lift sm:h-32 sm:w-48">
-                <VideoTile tile={localTile} muted mirror={!screenStream} filter={screenStream ? 'none' : FILTERS[filter]} className="h-full w-full" label={screenStream ? 'Compartiendo pantalla' : 'Tú'} />
+                <VideoTile tile={localTile} muted mirror={!screenStream} filter={screenStream ? 'none' : FILTERS[filter]} sinkId={audioOutputId} forcePlay={playEpoch} className="h-full w-full" label={screenStream ? 'Compartiendo pantalla' : 'Tú'} />
               </div>
             )}
           </>
         ) : (
           <div className="relative flex min-h-0 flex-1 items-center justify-center">
             {(localStream || screenStream) ? (
-              <VideoTile tile={localTile} muted mirror={!screenStream} filter={screenStream ? 'none' : FILTERS[filter]} className="h-full w-full" label={screenStream ? 'Compartiendo pantalla' : 'Tú'} />
+              <VideoTile tile={localTile} muted mirror={!screenStream} filter={screenStream ? 'none' : FILTERS[filter]} sinkId={audioOutputId} forcePlay={playEpoch} className="h-full w-full" label={screenStream ? 'Compartiendo pantalla' : 'Tú'} />
             ) : (
               <div className="flex flex-col items-center text-center text-white/60">
                 <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-white/15 bg-white/[.05]"><Video size={26} /></div>
@@ -472,6 +664,10 @@ export default function RoomCall({ roomId, members, userId, userName }: {
         {sharing && (
           <div className="absolute right-5 top-5 z-10 flex items-center gap-1.5 rounded-full bg-white/90 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-[#101013]">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-red-500" /> Pantalla activa
+            <span className="ml-1 flex items-center gap-1 normal-case tracking-normal text-white/10">
+              {shareAudio ? <Volume2 size={11} /> : <VolumeX size={11} />}
+              {shareAudio ? 'con audio' : 'sin audio'}
+            </span>
           </div>
         )}
 
@@ -501,6 +697,49 @@ export default function RoomCall({ roomId, members, userId, userName }: {
           >
             {sharing ? <MonitorOff size={18} /> : <MonitorUp size={18} />}
           </button>
+          {sharing && shareAudioAvailable && (
+            <button
+              onClick={toggleShareAudio}
+              className={cn('flex h-11 items-center gap-1.5 rounded-full border px-3 text-[11px] transition-transform hover:scale-105', shareAudio ? 'border-transparent bg-white text-[#101013]' : 'border-white/15 bg-white/[.08] text-white/85')}
+              aria-label={shareAudio ? 'Silenciar audio compartido' : 'Activar audio compartido'}
+              title={shareAudio ? 'Silenciar audio compartido' : 'Activar audio compartido'}
+            >
+              {shareAudio ? <Volume2 size={16} /> : <VolumeX size={16} />} Audio
+            </button>
+          )}
+          <button
+            onClick={() => setPlayEpoch((value) => value + 1)}
+            className="flex h-11 items-center gap-1.5 rounded-full border border-white/15 bg-white/[.08] px-3 text-[11px] text-white/80 hover:bg-white/[.15]"
+            title="Reanudar reproducción de audio si el navegador la bloqueó"
+          >
+            <Volume2 size={16} /> Activar audio
+          </button>
+          {deviceList.filter((device) => device.kind === 'audioinput').length > 1 && (
+            <label className="flex items-center gap-1 rounded-full border border-white/15 bg-white/[.08] px-2.5 py-2 text-[10px] text-white/70">
+              Mic
+              <select value={audioInputId} onChange={(event) => void switchMic(event.target.value)} className="max-w-[100px] bg-transparent text-white/80 outline-none [&>option]:bg-[#101013]">
+                {deviceList.filter((device) => device.kind === 'audioinput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Mic ${index + 1}`}</option>)}
+              </select>
+            </label>
+          )}
+          {deviceList.filter((device) => device.kind === 'videoinput').length > 1 && (
+            <label className="flex items-center gap-1 rounded-full border border-white/15 bg-white/[.08] px-2.5 py-2 text-[10px] text-white/70">
+              Cámara
+              <select value={videoInputId} onChange={(event) => void switchCamera(event.target.value)} className="max-w-[100px] bg-transparent text-white/80 outline-none [&>option]:bg-[#101013]">
+                {deviceList.filter((device) => device.kind === 'videoinput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Cámara ${index + 1}`}</option>)}
+              </select>
+              <button type="button" onClick={() => void switchFacing()} className="ml-1 text-white/60 hover:text-white" title="Cambiar cámara frontal/trasera">↻</button>
+            </label>
+          )}
+          {(typeof HTMLMediaElement !== 'undefined') && typeof (HTMLMediaElement.prototype as any).setSinkId === 'function' && deviceList.filter((device) => device.kind === 'audiooutput').length > 0 && (
+            <label className="flex items-center gap-1 rounded-full border border-white/15 bg-white/[.08] px-2.5 py-2 text-[10px] text-white/70">
+              Salida
+              <select value={audioOutputId} onChange={(event) => setAudioOutputId(event.target.value)} className="max-w-[100px] bg-transparent text-white/80 outline-none [&>option]:bg-[#101013]">
+                <option value="">Predeterminada</option>
+                {deviceList.filter((device) => device.kind === 'audiooutput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Altavoz ${index + 1}`}</option>)}
+              </select>
+            </label>
+          )}
           <label className="flex items-center gap-1.5 rounded-full border border-white/15 bg-white/[.08] px-2.5 py-2 text-white/80" title="Filtro de cámara">
             <Sparkles size={15} />
             <select
